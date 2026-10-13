@@ -38,7 +38,8 @@ namespace Loupedeck.AgentKeypadPlugin
 
         private static void Icon(BitmapBuilder b, String name, String color, Int32 size, Int32 x, Int32 y)
         {
-            var svg = Icons.Svg(name, color, size);
+            // The spinner's gap moves 45 degrees every quarter second, read from the clock, so each redraw shows a new position.
+            var svg = name == "spin" ? Icons.Spinner(color, size, (Environment.TickCount64 / 250 % 8) * 45) : Icons.Svg(name, color, size);
             if (svg != null && BitmapImage.TryCreateFromSvg(svg, out var icon))
             {
                 b.DrawImage(icon, x, y, size, size);
@@ -142,6 +143,14 @@ namespace Loupedeck.AgentKeypadPlugin
             {
                 DebugName = name;
                 Draw(face, PluginImageSize.Width116, false, false);
+            }
+
+            // Two frames of the transcribing key a quarter second apart: the spinner gap must sit in a different place.
+            for (var i = 0; i < 2; i++)
+            {
+                DebugName = $"sample-transcribing-{i}";
+                Draw(new KeyFace { Icon = "spin", IconColor = Colors.Amber, Label = "Transcribing", Small = $"0:0{i} · Claude", Tone = KeyTone.Sending }, PluginImageSize.Width116, false, false);
+                System.Threading.Thread.Sleep(260);
             }
         }
 

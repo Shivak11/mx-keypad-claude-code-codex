@@ -37,6 +37,20 @@ namespace Loupedeck.AgentKeypadPlugin
             ["folder"] = "<path d=\"M3 6a1 1 0 0 1 1-1h5l2 2h9a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1z\"/>",
         };
 
+        // A three-quarter circle whose gap starts at the given angle. The arc is computed instead of rotated,
+        // so it does not depend on the keypad's SVG renderer supporting transforms.
+        public static String Spinner(String color, Int32 size, Double degrees)
+        {
+            static String Point(Double deg)
+            {
+                var r = deg * Math.PI / 180;
+                return FormattableString.Invariant($"{12 + 9 * Math.Cos(r):0.###} {12 + 9 * Math.Sin(r):0.###}");
+            }
+
+            var path = $"<path d=\"M{Point(degrees)} A9 9 0 1 1 {Point(degrees + 270)}\"/>";
+            return Wrap(path, color, size);
+        }
+
         // The keypad's SVG renderer ignores stroke settings inherited from the outer element,
         // so each shape carries its own colour and stroke.
         public static String Svg(String name, String color, Int32 size)
@@ -46,6 +60,11 @@ namespace Loupedeck.AgentKeypadPlugin
                 return null;
             }
 
+            return Wrap(body, color, size);
+        }
+
+        private static String Wrap(String body, String color, Int32 size)
+        {
             var style = $"fill=\"none\" stroke=\"{color}\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"";
             body = body.Replace("<path ", $"<path {style} ").Replace("<rect ", $"<rect {style} ").Replace("<circle ", $"<circle {style} ");
             // A near-invisible dot in a second colour stops the renderer treating the icon as single-colour and recolouring it white.

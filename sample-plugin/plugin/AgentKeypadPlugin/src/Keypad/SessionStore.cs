@@ -47,23 +47,71 @@ namespace Loupedeck.AgentKeypadPlugin
         private Dictionary<String, (String link, String title, Boolean archived, Double active, String cwd)> _claude = new();
         private Dictionary<String, (String title, String cwd, Double updated)> _codex = new();   // threads you started, not helper agents
         private DateTime _titlesLoaded = DateTime.MinValue;
+        private const Double StaleWorkingSeconds = 20 * 60;
         private readonly Dictionary<String, (DateTime stamp, String cli, (String, String, Boolean, Double, String) entry)> _claudeFiles = new();
 
         public SessionStore(Action changed)
         {
             this._changed = changed;
             Directory.CreateDirectory(Dir);
-            this._debounce = new Timer(_ => { this.Reload(); this._changed(); });
+            this._debounce = new Timer(_ => this.ReloadAndNotify());
             this.Reload();
             this._watcher = new FileSystemWatcher(Dir, "*.json") { NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite, EnableRaisingEvents = true };
             this._watcher.Changed += (_, _) => this.Schedule();
             this._watcher.Created += (_, _) => this.Schedule();
             this._watcher.Deleted += (_, _) => this.Schedule();
             this._watcher.Renamed += (_, _) => this.Schedule();
-            this._tick = new Timer(_ => { this.Reload(); this._changed(); }, null, 30000, 30000);   // keeps ages current
+            this._tick = new Timer(_ => this.ReloadAndNotify(), null, 30000, 30000);   // keeps ages current
         }
 
-        private void Schedule() => this._debounce.Change(200, Timeout.Infinite);
+        private readonly Object _reloadLock = new();
+        private Boolean _reloadAgain;
+
+        // Timers and file events can ask for a reload at the same moment. One reload runs at a time,
+        // and a request that arrives during it runs once more afterwards, so the newest state always wins.
+        private void ReloadAndNotify()
+        {
+            try
+            {
+                if (!Monitor.TryEnter(this._reloadLock))
+                {
+                    this._reloadAgain = true;
+                    return;
+                }
+
+                try
+                {
+                    do
+                    {
+                        this._reloadAgain = false;
+                        this.Reload();
+                    }
+                    while (this._reloadAgain);
+                }
+                finally
+                {
+                    Monitor.Exit(this._reloadLock);
+                }
+
+                this._changed();
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning(ex, "session reload failed");
+            }
+        }
+
+        private void Schedule()
+        {
+            try
+            {
+                this._debounce.Change(200, Timeout.Infinite);
+            }
+            catch (ObjectDisposedException)
+            {
+                // a file event that arrived after unload
+            }
+        }
 
         public List<Session> All()
         {
@@ -105,6 +153,22 @@ namespace Loupedeck.AgentKeypadPlugin
                     if (s.App == null || s.Id == null)
                     {
                         continue;
+                    }
+
+                    if (s.State == "ended")
+                    {
+                        if (now - s.Updated > 60)
+                        {
+                            File.Delete(file);   // the hook marks an ended session instead of deleting it, so a late Stop cannot revive it
+                        }
+
+                        continue;
+                    }
+
+                    // Working with no report for 20 minutes usually means an event never arrived. Show it without a state.
+                    if (s.State == "working" && now - s.Updated > StaleWorkingSeconds)
+                    {
+                        s.State = "unknown";
                     }
 
                     if (now - s.Updated > MaxAgeSeconds)
@@ -220,14 +284,15 @@ namespace Loupedeck.AgentKeypadPlugin
             }
 
             // Codex threads you started yourself. Guardian reviews and helper agents are left out.
-            var codex = new Dictionary<String, (String, String, Double)>();
-            var json = MacNative.Output("/usr/bin/sqlite3", "-readonly", "-json", CodexDb,
+            Dictionary<String, (String, String, Double)> codex = null;
+            var json = MacNative.Output("/usr/bin/sqlite3", "-readonly", "-json", "-cmd", ".timeout 2000", CodexDb,
                 "select id, coalesce(nullif(name,''), nullif(title,''), '') as t, cwd, updated_at from threads " +
                 "where thread_source = 'user' and archived = 0 and updated_at > strftime('%s','now') - 604800");
             if (!String.IsNullOrEmpty(json))
             {
                 try
                 {
+                    codex = new Dictionary<String, (String, String, Double)>();
                     using var doc = JsonDocument.Parse(json);
                     foreach (var r in doc.RootElement.EnumerateArray())
                     {
@@ -236,12 +301,17 @@ namespace Loupedeck.AgentKeypadPlugin
                 }
                 catch (Exception ex)
                 {
+                    codex = null;
                     PluginLog.Warning(ex, "could not read Codex threads");
                 }
             }
 
             this._claude = claude;
-            this._codex = codex;
+            // A failed read keeps the previous list; an empty one would hide every Codex session until the next read.
+            if (codex != null || json == "")
+            {
+                this._codex = codex ?? new Dictionary<String, (String, String, Double)>();
+            }
             this._titlesLoaded = DateTime.UtcNow;
         }
 
@@ -292,7 +362,15 @@ namespace Loupedeck.AgentKeypadPlugin
 
             try
             {
+                // Take the hook's lock (an advisory flock, which .NET uses for FileShare.None), so a hook
+                // writing a new state at the same moment is not overwritten.
+                using var hookLock = LockHooks();
                 var j = JsonNode.Parse(File.ReadAllText(s.FilePath));
+                if ((String)j["state"] == "ended")
+                {
+                    return;
+                }
+
                 j["ready"] = false;
                 var tmp = s.FilePath + ".keypad-tmp";
                 File.WriteAllText(tmp, j.ToJsonString());
@@ -304,6 +382,21 @@ namespace Loupedeck.AgentKeypadPlugin
             }
         }
 
+        private static FileStream LockHooks()
+        {
+            for (var i = 0; ; i++)
+            {
+                try
+                {
+                    return new FileStream(Path.Combine(Dir, ".lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                }
+                catch (IOException) when (i < 50)
+                {
+                    Thread.Sleep(20);
+                }
+            }
+        }
+
         private static void Run(String file, params String[] args)
         {
             var psi = new ProcessStartInfo(file) { UseShellExecute = false };
@@ -312,7 +405,7 @@ namespace Loupedeck.AgentKeypadPlugin
                 psi.ArgumentList.Add(a);
             }
 
-            Process.Start(psi);
+            Process.Start(psi)?.Dispose();
         }
 
         public static String Age(Double unix)

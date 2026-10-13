@@ -107,6 +107,21 @@ namespace Loupedeck.AgentKeypadPlugin
 
         private static IntPtr S(String text) => CFStringCreateWithCString(IntPtr.Zero, text, Utf8);
 
+        // Attribute names are created once; creating them per element leaked thousands of strings per press.
+        private static readonly IntPtr AXRole = S("AXRole");
+        private static readonly IntPtr AXURL = S("AXURL");
+        private static readonly IntPtr AXChildren = S("AXChildren");
+        private static readonly IntPtr AXWindows = S("AXWindows");
+        private static readonly IntPtr AXManual = S("AXManualAccessibility");
+
+        private static void Release(IntPtr obj)
+        {
+            if (obj != IntPtr.Zero)
+            {
+                CFRelease(obj);
+            }
+        }
+
         private static String Str(IntPtr text)
         {
             if (text == IntPtr.Zero)
@@ -126,9 +141,16 @@ namespace Loupedeck.AgentKeypadPlugin
         }
 
         // Claude's own interface is a web page on claude.ai; any other http page in its windows is the panel.
-        private static Boolean IsClaudeUi(String url) =>
-            url == null || !(url.StartsWith("http://") || url.StartsWith("https://"))
-            || new Uri(url).Host.EndsWith("claude.ai") || new Uri(url).Host.EndsWith("anthropic.com");
+        private static Boolean IsClaudeUi(String url)
+        {
+            if (url == null || !Uri.TryCreate(url, UriKind.Absolute, out var uri) || (uri.Scheme != "http" && uri.Scheme != "https"))
+            {
+                return true;   // not a web page the panel could be showing
+            }
+
+            var host = uri.Host;
+            return host is "claude.ai" or "anthropic.com" || host.EndsWith(".claude.ai") || host.EndsWith(".anthropic.com");
+        }
 
         private static String ClaudeUrl()
         {
@@ -139,20 +161,29 @@ namespace Loupedeck.AgentKeypadPlugin
             }
 
             var app = AXUIElementCreateApplication(pid);
-            // Electron apps only build their accessibility tree when asked to.
-            var yes = Marshal.ReadIntPtr(NativeLibrary.GetExport(NativeLibrary.Load(CF), "kCFBooleanTrue"));
-            AXUIElementSetAttributeValue(app, S("AXManualAccessibility"), yes);
-
-            if (AXUIElementCopyAttributeValue(app, S("AXWindows"), out var windows) != 0 || windows == IntPtr.Zero)
-            {
-                return null;
-            }
-
+            var windows = IntPtr.Zero;
             var visited = 0;
             String found = null;
-            for (Int64 i = 0; i < CFArrayGetCount(windows) && found == null; i++)
+            try
             {
-                found = Walk(CFArrayGetValueAtIndex(windows, i), 0, ref visited);
+                // Electron apps only build their accessibility tree when asked to.
+                var yes = Marshal.ReadIntPtr(NativeLibrary.GetExport(NativeLibrary.Load(CF), "kCFBooleanTrue"));
+                AXUIElementSetAttributeValue(app, AXManual, yes);
+
+                if (AXUIElementCopyAttributeValue(app, AXWindows, out windows) != 0 || windows == IntPtr.Zero)
+                {
+                    return null;
+                }
+
+                for (Int64 i = 0; i < CFArrayGetCount(windows) && found == null; i++)
+                {
+                    found = Walk(CFArrayGetValueAtIndex(windows, i), 0, ref visited);
+                }
+            }
+            finally
+            {
+                Release(windows);
+                Release(app);
             }
 
             PluginLog.Info($"Claude panel read: {visited} elements, page {(found == null ? "none" : "found")}");
@@ -166,10 +197,13 @@ namespace Loupedeck.AgentKeypadPlugin
                 return null;
             }
 
-            if (AXUIElementCopyAttributeValue(element, S("AXRole"), out var role) == 0 && Str(role) == "AXWebArea"
-                && AXUIElementCopyAttributeValue(element, S("AXURL"), out var value) == 0 && value != IntPtr.Zero)
+            var role = IntPtr.Zero;
+            var isWebArea = AXUIElementCopyAttributeValue(element, AXRole, out role) == 0 && Str(role) == "AXWebArea";
+            Release(role);
+            if (isWebArea && AXUIElementCopyAttributeValue(element, AXURL, out var value) == 0 && value != IntPtr.Zero)
             {
                 var url = CFGetTypeID(value) == CFURLGetTypeID() ? Str(CFURLGetString(value)) : Str(value);
+                Release(value);
                 if (!IsClaudeUi(url))
                 {
                     return url;
@@ -178,21 +212,28 @@ namespace Loupedeck.AgentKeypadPlugin
                 // Claude's own page: keep looking inside it, since the panel may be nested there.
             }
 
-            if (AXUIElementCopyAttributeValue(element, S("AXChildren"), out var children) != 0 || children == IntPtr.Zero)
+            if (AXUIElementCopyAttributeValue(element, AXChildren, out var children) != 0 || children == IntPtr.Zero)
             {
                 return null;
             }
 
-            for (Int64 i = 0; i < CFArrayGetCount(children); i++)
+            try
             {
-                var url = Walk(CFArrayGetValueAtIndex(children, i), depth + 1, ref visited);
-                if (url != null)
+                for (Int64 i = 0; i < CFArrayGetCount(children); i++)
                 {
-                    return url;
+                    var url = Walk(CFArrayGetValueAtIndex(children, i), depth + 1, ref visited);
+                    if (url != null)
+                    {
+                        return url;
+                    }
                 }
-            }
 
-            return null;
+                return null;
+            }
+            finally
+            {
+                Release(children);
+            }
         }
     }
 }

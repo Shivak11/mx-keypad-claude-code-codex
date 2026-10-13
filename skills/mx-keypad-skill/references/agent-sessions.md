@@ -7,21 +7,25 @@ Both Claude Code and Codex run lifecycle hooks. Register one script for both app
 | Event | State |
 |---|---|
 | `UserPromptSubmit` | working |
-| `PermissionRequest` | waiting (remember which tool asked) |
+| `PermissionRequest` | waiting (remember the tool call that asked, by `tool_use_id`) |
 | `PreToolUse` with tool `AskUserQuestion` | waiting for an answer |
-| `PostToolUse`, `PostToolUseFailure`, `PermissionDenied` | clear the wait only when the waiting tool finishes; after Stop, set working again |
+| `PostToolUse`, `PostToolUseFailure`, `PermissionDenied` | clear a wait only when the tool call that asked finishes; `is_interrupt` (Esc or a refused dialog) means idle; after Stop, set working again unless the event carries `agent_id` (a background subagent) |
 | `Stop`, `StopFailure` | idle and ready (finished, not yet opened) |
-| `SessionStart` | idle |
-| `SessionEnd` | delete the file |
+| `SessionStart` | idle, except `source: "compact"` in the middle of a turn |
+| `SessionEnd` | mark the record ended; the plugin deletes it a minute later, so a late `Stop` cannot bring it back |
 
 Practical details:
 
 - Validate the session id (letters, digits, `-` and `_`, at most 128 characters) before using it in a file name.
-- Take a file lock around read-modify-write. Parallel tool events otherwise overwrite a permission wait.
+- Take a file lock around read-modify-write. Parallel tool events otherwise overwrite a permission wait. Give up after a second or two rather than hold up the agent.
+- Matching a wait by tool name is not enough: a parallel call of the same tool would clear it. Keep a list of waiting `tool_use_id`s.
+- An interrupted turn ends without `Stop`. Without the `is_interrupt` rule, a session stays on Working or Waiting.
+- Other plugins can start headless `claude --print` runs that fire the same hooks (one set `CLAUDE_HOOK_JUDGE_MODE`). Skip them, or they appear as sessions after every turn.
+- Show a session that has said Working for a long time (20 minutes) without any event as having no state.
 - Write atomically (temp file, then rename) and remove temp files on failure.
 - Delete records older than 48 hours.
 - Claude Code: add entries to `~/.claude/settings.json` under `hooks`. Codex: `~/.codex/hooks.json` with `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, `Stop`, `SessionEnd`. Back up both files and keep the user's other hooks.
-- Codex asks the user to trust new hooks after a restart. Only the user approves them.
+- Codex runs a hook only after the user approves it in Codex's hook review. The approval is stored per position (`hooks.state."<file>:<event>:<group>:<hook>"` in `~/.codex/config.toml`), so an installer that removes and re-adds entries moves them and loses the approval. Leave an unchanged file alone, and tell the user to approve again after any change. Only the user approves them. On one machine only the `PostToolUse` entry was approved, so every Codex session showed Working forever.
 
 The sample installer is `sample-plugin/hooks/install_hooks.py` (`--remove` takes the entries out).
 

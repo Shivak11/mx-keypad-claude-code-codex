@@ -19,8 +19,14 @@ namespace Loupedeck.AgentKeypadPlugin
     {
         private const Int32 PerPage = 6;
 
+        // With no key pressed for this long, the keypad goes back to the Home screen on the first page.
+        private static readonly TimeSpan IdleReturnAfter = TimeSpan.FromSeconds(60);
+        private const Int32 IdleCheckMs = 5000;
+
         public void Dispose()
         {
+            this._disposed = true;
+            this._idleTimer.Dispose();
             this._usageTimer.Dispose();
             this._pulseTimer.Dispose();
             this._capture.Dispose();
@@ -35,7 +41,21 @@ namespace Loupedeck.AgentKeypadPlugin
         private String _lastAiBeforeDia;
         private readonly Timer _usageTimer;
         private readonly Timer _pulseTimer;
+        private readonly Timer _idleTimer;
+        private volatile Boolean _disposed;
+        private Int32 _diaBusy;
+        private readonly Dictionary<String, (KeyFace face, Int64 at)> _downFaces = new();   // the face each key showed when pressed down
+        private readonly Dictionary<String, Int32> _labelTokens = new();                     // newest Deny or Flash per key
+        private Int32 _labelToken;
         private DateTime _usageReadAt = DateTime.MinValue;
+
+        // Idle return state, guarded by _lock. Groups: "h" Home keys, "m" Moves keys, "x" Go to Home page,
+        // "none" when Options+ drew no key of this plugin (a page such as Logitech's defaults).
+        private DateTime _lastActivity = DateTime.UtcNow;
+        private Boolean _idleReturned;
+        private Boolean _idleCheckPending;
+        private readonly HashSet<String> _renderedGroups = new();
+        private String _shownGroup;
 
         private readonly Dictionary<String, List<String>> _stacks = new()
         {
@@ -54,11 +74,18 @@ namespace Loupedeck.AgentKeypadPlugin
         public KeypadController(Plugin plugin, Action redraw)
         {
             this._plugin = plugin;
-            this._redraw = redraw;
+            this._redraw = () =>
+            {
+                if (!this._disposed)
+                {
+                    redraw();
+                }
+            };
             this._sessions = new SessionStore(redraw);
             this._capture = new CaptureController(plugin, redraw);
             this._usageTimer = new Timer(_ => this.RefreshUsage(), null, 0, 600000);
             this._pulseTimer = new Timer(_ => this.PulseTick(), null, 250, 250);
+            this._idleTimer = new Timer(_ => this.IdleTick(), null, IdleCheckMs, IdleCheckMs);
         }
 
         // ---------- parameters ----------
@@ -86,6 +113,17 @@ namespace Loupedeck.AgentKeypadPlugin
 
         public BitmapImage Render(String id, PluginImageSize size)
         {
+            if (String.IsNullOrEmpty(id))
+            {
+                return KeyRenderer.Draw(KeyFace.Empty(), size, false, false);
+            }
+
+            lock (this._lock)
+            {
+                // Options+ asks only for the keys on the page it is showing, so this tells the idle check which page that is.
+                this._renderedGroups.Add(id.Substring(0, 1));
+            }
+
             var face = this.FaceFor(id);
             Boolean pressed;
             String deniedWhy;
@@ -227,7 +265,9 @@ namespace Loupedeck.AgentKeypadPlugin
                 new KeyFace { Icon = "claude", IconColor = Colors.Orange, Label = "Claude Code", Badge = Needs("claude"), BadgeColor = NeedsColor("claude"), Act = () => this.Go("h", "claude") },
                 this.CaptureFace("area", "h3"),
                 this.CaptureFace("voice", "h4"),
-                this._capture.Phase is CapturePhase.Selecting or CapturePhase.Recording
+                this._capture.Phase == CapturePhase.Recording
+                    ? new KeyFace { Icon = "stop", IconColor = Colors.Red, Label = "Stop", Act = () => this._capture.Cancel() }
+                    : this._capture.Phase == CapturePhase.Selecting
                     ? new KeyFace { Icon = "x", IconColor = Colors.Slate, Label = "Cancel", Act = () => this._capture.Cancel() }
                     : new KeyFace { Icon = "x", IconColor = Colors.Slate, Label = "Cancel", Tone = KeyTone.Off, Why = "nothing to stop" },
                 new KeyFace { Icon = "dia", IconColor = Colors.Violet, Label = "Open in Dia", Act = () => this.OpenInDia("h6") },
@@ -268,9 +308,9 @@ namespace Loupedeck.AgentKeypadPlugin
             return c.Phase switch
             {
                 CapturePhase.Selecting => new KeyFace { Icon = "area", IconColor = Colors.Blue, Label = "Drag area", Small = "Esc to cancel", Tone = KeyTone.Selecting },
-                CapturePhase.Recording => new KeyFace { Icon = "stop", IconColor = Colors.Red, Label = "Stop + send", Small = $"{c.Elapsed()} · {to}", Tone = KeyTone.Recording, Act = () => c.Stop() },
-                CapturePhase.Processing => new KeyFace { Icon = "spin", IconColor = Colors.Amber, Label = c.Step ?? "Working", Small = to, Tone = KeyTone.Sending },
-                CapturePhase.Sent => new KeyFace { Icon = "check", IconColor = Colors.Green, Label = "Sent", Small = to, Tone = KeyTone.Sent, Act = c.Clear },
+                CapturePhase.Recording => new KeyFace { Icon = "stop", IconColor = Colors.Red, Label = "Stop", Small = $"{c.Elapsed()} · {to}", Tone = KeyTone.Recording, Act = () => c.Stop() },
+                CapturePhase.Processing => new KeyFace { Icon = "spin", IconColor = Colors.Amber, Label = c.Step ?? "Working", Small = $"{c.ProcessingElapsed()} · {to}", Tone = KeyTone.Sending },
+                CapturePhase.InBox => new KeyFace { Icon = "check", IconColor = Colors.Green, Label = "In box", Small = to, Tone = KeyTone.Sent, Act = c.Clear },
                 CapturePhase.NotSent => new KeyFace { Icon = "clip", IconColor = Colors.Slate, Label = "Not sent", Small = c.Note, Tone = KeyTone.NotSent, Act = c.Clear },
                 _ => idle,
             };
@@ -287,18 +327,36 @@ namespace Loupedeck.AgentKeypadPlugin
                 return;
             }
 
+            if (Interlocked.CompareExchange(ref this._diaBusy, 1, 0) != 0)
+            {
+                this.Deny(keyId, "busy");
+                return;
+            }
+
             Task.Run(() =>
             {
-                var (url, why) = BrowserPanel.CurrentUrl(app);
-                if (url == null)
+                try
                 {
-                    this.Deny(keyId, why);
-                    return;
-                }
+                    var (url, why) = BrowserPanel.CurrentUrl(app);
+                    if (url == null)
+                    {
+                        this.Deny(keyId, why);
+                        return;
+                    }
 
-                this._lastAiBeforeDia = app;
-                MacNative.Run("/usr/bin/open", "-b", "company.thebrowser.dia", url);
-                this.Flash(keyId, "Opened");
+                    this._lastAiBeforeDia = app;
+                    MacNative.Run("/usr/bin/open", "-b", "company.thebrowser.dia", url);
+                    this.Flash(keyId, "Opened");
+                }
+                catch (Exception ex)
+                {
+                    PluginLog.Error(ex, "open in Dia failed");
+                    this.Deny(keyId, "failed");
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref this._diaBusy, 0);
+                }
             });
         }
 
@@ -344,11 +402,11 @@ namespace Loupedeck.AgentKeypadPlugin
                 Icon = "swap",
                 IconColor = claude ? Colors.Orange : Colors.Teal,
                 Label = claude ? "To Claude" : "To Codex",
-                Act = () =>
+                Act = () => Task.Run(() =>
                 {
                     MacNative.Activate(this.SwitchTarget());
                     this._redraw();
-                },
+                }),
             };
         }
 
@@ -488,10 +546,13 @@ namespace Loupedeck.AgentKeypadPlugin
         // Physical key down: show press feedback at once, before the action runs.
         public void PressDown(String id)
         {
+            var face = this.FaceFor(id);
             lock (this._lock)
             {
+                this._downFaces[id] = (face, Stopwatch.GetTimestamp());
                 this._pressed.Add(id);
                 this._pressTicks[id] = Stopwatch.GetTimestamp();
+                this.MarkActivity();
             }
 
             this._redraw();
@@ -504,9 +565,21 @@ namespace Loupedeck.AgentKeypadPlugin
             });
         }
 
+        // Runs the action of the face the key showed on the downstroke, so a list that reorders or a state that
+        // times out between down and up cannot turn the press into a different action.
         public void Press(String id)
         {
-            var face = this.FaceFor(id);
+            KeyFace face = null;
+            lock (this._lock)
+            {
+                this.MarkActivity();
+                if (this._downFaces.Remove(id, out var down) && Stopwatch.GetElapsedTime(down.at) < TimeSpan.FromSeconds(5))
+                {
+                    face = down.face;
+                }
+            }
+
+            face ??= this.FaceFor(id);
             if (face.Tone == KeyTone.Empty || face.Kind == KeyKind.Note)
             {
                 return;
@@ -580,21 +653,135 @@ namespace Loupedeck.AgentKeypadPlugin
         // Redraws only while a list page showing a working session is open, so the border pulses without constant redraws.
         private void PulseTick()
         {
-            var page = this.CurrentPage("h");
-            if (page is not ("codex" or "claude" or "waiting" or "ready"))
+            try
             {
-                return;
-            }
+                // The spinner on a transcribing or pasting key turns one step on every redraw.
+                if (this._capture.Phase == CapturePhase.Processing)
+                {
+                    this._redraw();
+                    return;
+                }
 
-            var app = page == "codex" ? "codex" : page == "claude" ? "claude" : null;
-            if (!this._sessions.All().Any(s => s.State == "working" && (app == null || s.App == app)))
+                String shown;
+                lock (this._lock)
+                {
+                    shown = this._shownGroup;
+                }
+
+                var page = this.CurrentPage("h");
+                if (shown is not (null or "h") || page is not ("codex" or "claude" or "waiting" or "ready"))
+                {
+                    return;
+                }
+
+                var app = page == "codex" ? "codex" : page == "claude" ? "claude" : null;
+                if (!this._sessions.All().Any(s => s.State == "working" && (app == null || s.App == app)))
+                {
+                    return;
+                }
+
+                KeyRenderer.Pulse = (KeyRenderer.Pulse + 0.125) % 1.0;
+                this._redraw();
+            }
+            catch (Exception ex)
             {
-                return;
+                PluginLog.Warning(ex, "pulse failed");
             }
-
-            KeyRenderer.Pulse = (KeyRenderer.Pulse + 0.125) % 1.0;
-            this._redraw();
         }
+
+        // Caller holds _lock. A press, a change of page and a running capture each restart the idle countdown.
+        private void MarkActivity()
+        {
+            this._lastActivity = DateTime.UtcNow;
+            this._idleReturned = false;
+        }
+
+        // Every 5 seconds: work out which page Options+ is showing from the keys it drew since the last check,
+        // then return to Home once the keypad has been idle for IdleReturnAfter on any other screen.
+        // The redraw at the end asks Options+ to draw the visible page again, which answers the next check.
+        private void IdleTick()
+        {
+            try
+            {
+                String shown, why = null;
+                lock (this._lock)
+                {
+                    // Two groups in one window means a page change mid-window or two kinds of key on one page: keep the last reading.
+                    shown = this._renderedGroups.Count switch
+                    {
+                        0 => "none",
+                        1 => this._renderedGroups.First(),
+                        _ => this._shownGroup ?? "none",
+                    };
+                    this._renderedGroups.Clear();
+                    if (shown != this._shownGroup)
+                    {
+                        if (this._shownGroup != null)
+                        {
+                            PluginLog.Info($"idle check: keypad now shows {GroupName(shown)}");
+                            this.MarkActivity();
+                        }
+
+                        this._shownGroup = shown;
+                    }
+
+                    if (this._idleCheckPending)
+                    {
+                        this._idleCheckPending = false;
+                        if (shown != "h")
+                        {
+                            PluginLog.Warning($"idle return: asked Options+ for the first page, but it still shows {GroupName(shown)}");
+                        }
+                    }
+
+                    if (this._capture.Busy)
+                    {
+                        this.MarkActivity();
+                    }
+
+                    if (!this._idleReturned && DateTime.UtcNow - this._lastActivity >= IdleReturnAfter)
+                    {
+                        this._idleReturned = true;
+                        var screens = this._stacks["h"][^1] + "/" + this._stacks["m"][^1];
+                        var onHome = shown == "h" && this._stacks["h"].Count == 1 && this._pageNo["h"] == 0;
+                        if (!onHome)
+                        {
+                            why = $"{GroupName(shown)}, screens {screens}";
+                        }
+                        else if (this._stacks["m"].Count > 1)
+                        {
+                            // Already on Home: only make sure Moves opens on its first screen next time.
+                            this._stacks["m"].RemoveRange(1, this._stacks["m"].Count - 1);
+                        }
+                    }
+                }
+
+                if (why != null)
+                {
+                    PluginLog.Info($"idle return: no key pressed for {IdleReturnAfter.TotalSeconds:0} s on {why}; going to Home");
+                    lock (this._lock)
+                    {
+                        this._idleCheckPending = true;
+                    }
+
+                    this.ToHomePage("idle", quiet: true);
+                }
+
+                this._redraw();
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning(ex, "idle check failed");
+            }
+        }
+
+        private static String GroupName(String group) => group switch
+        {
+            "h" => "the Home page",
+            "m" => "the Moves page",
+            "x" => "a page with the Go to Home page key",
+            _ => "a page without plugin keys",
+        };
 
         // Usage is read in the background every 10 minutes, and again on opening if the last read is over 2 minutes old.
         private void OpenUsage()
@@ -626,11 +813,11 @@ namespace Loupedeck.AgentKeypadPlugin
 
         // Home on any page outside the Home keys: reset both screens and show the first keypad page,
         // which holds Waiting, Codex and Claude Code.
-        private void ToHomePage(String keyId)
+        private void ToHomePage(String keyId, Boolean quiet = false)
         {
             this.Go("m", "moves");
             this.Go("h", "home");
-            this.SwitchPage(keyId, "@FirstTouchPage");
+            this.SwitchPage(keyId, "@FirstTouchPage", quiet);
         }
 
         // Back on the Moves page: the Home keys are on the page before it.
@@ -641,7 +828,9 @@ namespace Loupedeck.AgentKeypadPlugin
             this.SwitchPage(keyId, "@PreviousTouchPage");
         }
 
-        private void SwitchPage(String keyId, String action)
+        // ExecuteGenericAction only queues the request; Options+ carries it out afterwards with no link to a key press,
+        // so the same call works from the idle timer. "ran" means the request was sent.
+        private void SwitchPage(String keyId, String action, Boolean quiet = false)
         {
             try
             {
@@ -651,15 +840,21 @@ namespace Loupedeck.AgentKeypadPlugin
             catch (Exception ex)
             {
                 PluginLog.Error(ex, $"{keyId}: {action} failed");
-                this.Deny(keyId, "use ‹ › keys");
+                if (!quiet)
+                {
+                    this.Deny(keyId, "use ‹ › keys");
+                }
             }
         }
 
+        // Shows a reason on a key for 1.2 s. A newer Deny or Flash on the same key keeps its own full time.
         private void Deny(String id, String why)
         {
+            Int32 token;
             lock (this._lock)
             {
                 this._denied[id] = why;
+                token = this._labelTokens[id] = ++this._labelToken;
             }
 
             this._redraw();
@@ -667,23 +862,32 @@ namespace Loupedeck.AgentKeypadPlugin
             {
                 lock (this._lock)
                 {
-                    this._denied.Remove(id);
+                    if (this._labelTokens.GetValueOrDefault(id) == token)
+                    {
+                        this._denied.Remove(id);
+                    }
                 }
             });
         }
 
         private void Flash(String id, String label)
         {
+            Int32 token;
             lock (this._lock)
             {
                 this._flash[id] = label;
+                token = this._labelTokens[id] = ++this._labelToken;
             }
 
+            this._redraw();
             this.After(1000, () =>
             {
                 lock (this._lock)
                 {
-                    this._flash.Remove(id);
+                    if (this._labelTokens.GetValueOrDefault(id) == token)
+                    {
+                        this._flash.Remove(id);
+                    }
                 }
             });
         }
@@ -709,7 +913,7 @@ namespace Loupedeck.AgentKeypadPlugin
             var path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), name);
             var psi = new ProcessStartInfo("/usr/bin/open") { UseShellExecute = false };
             psi.ArgumentList.Add(path);
-            Process.Start(psi);
+            Process.Start(psi)?.Dispose();
         }
 
         // Control+Command+Option+4 is the capture shortcut used by Xnapper; change it for your screenshot app.

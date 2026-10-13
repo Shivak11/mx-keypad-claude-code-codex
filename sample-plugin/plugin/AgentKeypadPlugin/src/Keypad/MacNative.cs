@@ -131,7 +131,19 @@ namespace Loupedeck.AgentKeypadPlugin
 
             using var p = Process.Start(psi);
             var text = p.StandardOutput.ReadToEnd();
-            p.WaitForExit(10000);
+            if (!p.WaitForExit(10000))
+            {
+                try
+                {
+                    p.Kill();
+                }
+                catch (Exception)
+                {
+                }
+
+                return null;
+            }
+
             return p.ExitCode == 0 ? text.Trim() : null;
         }
     }

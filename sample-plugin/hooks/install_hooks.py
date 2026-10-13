@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Install or remove the MX Keypad session hooks for Claude Code and Codex.
 
-Copies keypad_hook.py to ~/.mx-keypad/bin/, backs up each settings file, removes any
-earlier keypad entries and adds the current ones. Other hooks are left untouched.
-Running it twice gives the same result. `--remove` takes the keypad entries out again.
+Copies keypad_hook.py to ~/.mx-keypad/bin/. A settings file that already has exactly the
+current keypad entries is left alone. Otherwise it is backed up, earlier keypad entries are
+removed and the current ones added. Other hooks are left untouched. A missing settings file
+is skipped. `--remove` takes the keypad entries out again.
+
+Codex runs a hook only after it has been approved in Codex's hook review, and the approval
+is tied to the hook's position in hooks.json. Leaving an unchanged file alone keeps the
+approvals; after any change, approve the keypad hooks again in Codex.
 """
 import json
 import os
@@ -66,15 +71,26 @@ def save(path, data):
     os.replace(tmp, path)
 
 
+def keypad_commands(hooks):
+    return sorted(h.get("command", "") for groups in hooks.values() for g in groups for h in g.get("hooks", []) if MARK in h.get("command", ""))
+
+
 def update(path, add):
     with open(path) as f:
         data = json.load(f)
+    if add:
+        wanted = {}
+        add(wanted)
+        if keypad_commands(data.get("hooks", {})) == keypad_commands(wanted):
+            print("unchanged:", path)
+            return False
     print("backup:", backup(path))
     hooks = data.setdefault("hooks", {})
     strip_keypad(hooks)
     if add:
         add(hooks)
     save(path, data)
+    return True
 
 
 def add_claude(hooks):
@@ -92,16 +108,22 @@ def add_codex(hooks):
 
 def main():
     remove = "--remove" in sys.argv
+    present = [p for p in (CLAUDE, CODEX) if os.path.exists(p)]
+    for path in (CLAUDE, CODEX):
+        if path not in present:
+            print("skipped, not found:", path)
+    # Read every file first, so a broken file stops the run before anything is written.
+    for path in present:
+        with open(path) as f:
+            json.load(f)
     if not remove:
         os.makedirs(BIN, exist_ok=True)
         os.makedirs(os.path.join(HOME, ".mx-keypad", "sessions"), exist_ok=True)
         shutil.copy2(os.path.join(os.path.dirname(os.path.abspath(__file__)), "keypad_hook.py"), HOOK)
-    # Read both files first, so a broken file stops the run before anything is written.
-    for path in (CLAUDE, CODEX):
-        with open(path) as f:
-            json.load(f)
-    update(CLAUDE, None if remove else add_claude)
-    update(CODEX, None if remove else add_codex)
+    if CLAUDE in present:
+        update(CLAUDE, None if remove else add_claude)
+    if CODEX in present and update(CODEX, None if remove else add_codex) and not remove:
+        print("Codex: open Codex and approve the keypad hooks in its hook review. Until then Codex does not run them.")
     print("removed" if remove else "installed")
 
 

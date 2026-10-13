@@ -30,6 +30,11 @@ These are the problems that took hours to find. Check each one before debugging 
 | Simulated fn key does nothing | fn and Shift are modifier keys and must be sent as flags-changed events | Set the event type to 12 (`kCGEventFlagsChanged`) |
 | A key sent the wrong shortcut and switched the agent to another session | Blind keystroke chains (Command+Space, then Command+4) landed in the agent app when the first step failed | Never chain keystrokes on a guess; check the frontmost app first, or use an app's own action |
 | `File.Copy` fails with a sharing violation on an app's database | .NET honours the lock another process holds | Copy with `/bin/cp`, then read the copy |
+| The plugin cannot tell which Options+ page is on screen | The keypad's own page buttons never reach the plugin | Options+ asks only for images of the visible page's keys: trigger a redraw and note which keys come back |
+| A spinner looks frozen on the device | It was drawn once and nothing redrew the key | Redraw progress states on a timer (about four times a second) and derive the frame from the clock; add a seconds count |
+| The user said a dictation "gets stuck on Not sent" although the text arrived | They stopped with Cancel, which skipped Return by design, and the key stayed on Not sent until pressed | Never press Return after dictation; end every capture on a short-lived, plainly named state such as "In box" |
+| Codex sessions only ever show Working | Codex runs a hook only after it is approved, the approval is tied to the hook's position in `hooks.json`, and only `PostToolUse` was approved | Ask the user to approve every keypad hook in Codex's hook review; never move entries in `hooks.json` without telling them to approve again |
+| A session stays on Working or Waiting after Esc or a refused dialog | An interrupted turn ends without `Stop` | Treat a tool event with `is_interrupt` as idle |
 
 ## Architecture that works
 
@@ -54,7 +59,7 @@ Read `references/agent-sessions.md` for the hook events, the state machine, wher
 
 ## Sending voice and screenshots to the last AI window
 
-Track the frontmost app every 500 ms and remember the last AI app. Fix the target when a capture starts. When sending, bring the target forward, paste, check it is still in front, and press Return only then. If anything is uncertain, leave the text on the clipboard and show "Not sent" on the key; never retry on your own. Details and the macOS calls are in `references/macos-native.md`.
+Track the frontmost app every 500 ms and remember the last AI app. Fix the target when a capture starts. When sending, bring the target forward, paste, and check it is still in front. Do not press Return for dictation or screenshots: the user sends the message, and the key shows "In box" for a few seconds and then returns to its normal face. Wait for the target to be in front before pasting or stopping the recorder, because the recorder pastes into whatever app is in front. If the text did not reach the box, leave it on the clipboard and show "Not sent"; never retry on your own. Give every capture a number and ignore late work from an earlier one, and log every capture outcome with its reason. Details and the macOS calls are in `references/macos-native.md`.
 
 ## Design rules for the keys
 
@@ -70,7 +75,7 @@ The owner of the first plugin cared about these, and they hold up on an 80 to 11
 
 - Gate a debug mode on a marker file (for example `~/.mx-keypad/debug-renders`). In debug mode, save every drawn key as a PNG and draw every screen at load, then look at the PNGs.
 - Run probes inside the plugin at load in debug mode when something depends on the service's own permissions (Accessibility, network, Keychain). The service has different permissions from your terminal.
-- Log one line per outcome to the plugin log at `~/Library/Application Support/Logi/LogiPluginService/Logs/plugin_logs/<Name>.log`. Never log secrets.
+- Log one line per outcome to the plugin log, including every capture result and its reason, at `~/Library/Application Support/Logi/LogiPluginService/Logs/plugin_logs/<Name>.log`. Never log secrets.
 - Reload with `open -g "loupedeck:plugin/<Name>/reload"`. Every reload sends a fresh round of network requests unless you cache and back off.
 
 ## Reference files

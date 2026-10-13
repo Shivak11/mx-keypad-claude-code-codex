@@ -46,6 +46,9 @@ The service asks for several sizes. Seen in practice: `Width90` (80 x 80), `Widt
 - Instant actions flash a green tick with "Opened" or "Done" for about a second.
 - Long operations keep their own colour until they end, and must always end: add a watchdog so a key can never stay on "Sending".
 - Animation such as a pulsing border needs a timer that redraws about four times a second. Run it only while an animated key is on screen.
+- A spinner drawn once looks frozen, because the service only shows what you hand it. During a progress state, redraw on that timer and compute the arc from the clock (a three-quarter circle whose start angle moves 45 degrees every quarter second); computing the path avoids depending on SVG transforms. Add a seconds count in the small row, so the key visibly changes even if the device shows fewer frames.
+- End states must be short-lived and plainly named. "In box" for three seconds, then back to the normal face, was clear; "Not sent" that stayed until pressed made a working dictation look broken.
+- A press should run the action of the face the key showed on the downstroke. Lists reorder and states time out between down and up.
 
 ## Never let a key fail to draw
 

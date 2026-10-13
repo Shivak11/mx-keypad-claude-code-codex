@@ -5,11 +5,11 @@ namespace Loupedeck.AgentKeypadPlugin
     using System.Threading;
     using System.Threading.Tasks;
 
-    internal enum CapturePhase { Idle, Selecting, Recording, Processing, Sent, NotSent }
+    internal enum CapturePhase { Idle, Selecting, Recording, Processing, InBox, NotSent }
 
     // Dictate and Select Area. The receiving app is fixed when capture starts: the last of
     // Claude or Codex that was in front. Doing records and transcribes; the plugin brings the
-    // receiving app forward before Doing pastes, and presses Return only if it is still in front.
+    // receiving app forward before Doing pastes. The plugin never presses Return: the user sends the message.
     internal sealed class CaptureController : IDisposable
     {
         public const String ClaudeBundle = "com.anthropic.claudefordesktop";
@@ -28,11 +28,18 @@ namespace Loupedeck.AgentKeypadPlugin
         public String LastAi { get; private set; }          // last Claude or Codex bundle in front
         public DateTime StartedAt { get; private set; }
         public String Step { get; private set; }
+        public DateTime ProcessingSince { get; private set; }
 
         public CaptureController(Plugin plugin, Action redraw)
         {
             this._plugin = plugin;
-            this._redraw = redraw;
+            this._redraw = () =>
+            {
+                if (!this._disposed)
+                {
+                    redraw();
+                }
+            };
             this._poll = new Timer(_ => this.Poll(), null, 0, 500);
         }
 
@@ -41,37 +48,44 @@ namespace Loupedeck.AgentKeypadPlugin
         public Boolean Busy => this.Phase is CapturePhase.Selecting or CapturePhase.Recording or CapturePhase.Processing;
 
         private Int32 _ticks;
-        private Int32 _generation;
+        private Int32 _generation;   // one number per capture; work from an older capture may not change the key
+        private Int32 _sending;      // 1 while Keep in wiki is pasting
+        private volatile Boolean _disposed;
         private String _lastFront;
 
         private void Poll()
         {
-            var front = MacNative.FrontmostBundleId();
-            if (front == ClaudeBundle || front == CodexBundle)
+            try
             {
-                if (this.LastAi != front)
+                var front = MacNative.FrontmostBundleId();
+                if (front == ClaudeBundle || front == CodexBundle)
                 {
                     this.LastAi = front;
                 }
-            }
 
-            // The switch key offers the other agent, so redraw when the front app changes.
-            if (front != this._lastFront)
-            {
-                this._lastFront = front;
-                this._redraw();
-            }
+                // The switch key offers the other agent, so redraw when the front app changes.
+                if (front != this._lastFront)
+                {
+                    this._lastFront = front;
+                    this._redraw();
+                }
 
-            // Recording shows a running timer, so redraw once a second while recording.
-            if (this.Phase == CapturePhase.Recording && ++this._ticks % 2 == 0)
+                // Recording and processing show a running count of seconds, so redraw once a second.
+                if (this.Phase is CapturePhase.Recording or CapturePhase.Processing && ++this._ticks % 2 == 0)
+                {
+                    this._redraw();
+                }
+            }
+            catch (Exception ex)
             {
-                this._redraw();
+                PluginLog.Warning(ex, "capture: poll failed");
             }
         }
 
         // Returns a reason when capture cannot start, otherwise null.
         public String Start(String kind)
         {
+            Int32 gen;
             lock (this._lock)
             {
                 if (this.Busy)
@@ -84,6 +98,7 @@ namespace Loupedeck.AgentKeypadPlugin
                     return "no AI app yet";
                 }
 
+                gen = ++this._generation;
                 this.Kind = kind;
                 this.Target = this.LastAi;
                 this.Note = null;
@@ -92,12 +107,29 @@ namespace Loupedeck.AgentKeypadPlugin
             }
 
             this._redraw();
-            Task.Run(kind == "area" ? this.SelectThenRecord : this.BeginRecording);
+            Task.Run(() =>
+            {
+                if (kind == "area")
+                {
+                    this.SelectThenRecord(gen);
+                }
+                else
+                {
+                    this.BeginRecording(gen);
+                }
+            });
             return null;
         }
 
-        private void BeginRecording()
+        private Boolean Current(Int32 gen) => !this._disposed && this._generation == gen;
+
+        private void BeginRecording(Int32 gen)
         {
+            if (!this.Current(gen))
+            {
+                return;
+            }
+
             try
             {
                 MacNative.FnHandsFree();
@@ -105,54 +137,110 @@ namespace Loupedeck.AgentKeypadPlugin
             catch (Exception ex)
             {
                 PluginLog.Error(ex, "capture: could not start Doing");
-                this.Finish(CapturePhase.NotSent, "Doing failed");
+                this.Finish(gen, CapturePhase.NotSent, "Doing failed");
                 return;
             }
 
             PluginLog.Info($"capture: recording for {AppName(this.Target)}");
         }
 
-        private void SelectThenRecord()
+        // Brings the target forward and waits up to 1.5 s for it, asking once more halfway. Returns whether it is in front.
+        private Boolean BringForward(String target)
         {
-            var before = MacNative.ClipboardChangeCount();
+            MacNative.Activate(target);
+            for (var i = 0; i < 15; i++)
+            {
+                if (MacNative.FrontmostBundleId() == target)
+                {
+                    return true;
+                }
+
+                if (i == 7)
+                {
+                    MacNative.Activate(target);
+                }
+
+                Thread.Sleep(100);
+            }
+
+            return MacNative.FrontmostBundleId() == target;
+        }
+
+        private void SelectThenRecord(Int32 gen)
+        {
             try
             {
+                var before = MacNative.ClipboardChangeCount();
                 var psi = new ProcessStartInfo("/usr/sbin/screencapture") { UseShellExecute = false };
                 psi.ArgumentList.Add("-i");   // drag to choose an area; Esc cancels
                 psi.ArgumentList.Add("-c");   // put the image on the clipboard
-                this._selector = Process.Start(psi);
-                this._selector.WaitForExit();
+                var selector = Process.Start(psi);
+                lock (this._lock)
+                {
+                    this._selector = selector;
+                    if (!this.Current(gen) || this.Phase != CapturePhase.Selecting)
+                    {
+                        TryKill(selector);   // cancelled while screencapture was starting
+                        return;
+                    }
+                }
+
+                selector.WaitForExit();
+                lock (this._lock)
+                {
+                    if (!this.Current(gen) || this.Phase != CapturePhase.Selecting)
+                    {
+                        return;   // cancelled from the keypad
+                    }
+                }
+
+                if (MacNative.ClipboardChangeCount() == before)
+                {
+                    this.Finish(gen, CapturePhase.Idle, null, "no area chosen");
+                    return;   // Esc pressed: nothing captured, no recording started
+                }
+
+                // Attach the image to the receiving app's message box, then start recording.
+                if (!this.BringForward(this.Target))
+                {
+                    this.Finish(gen, CapturePhase.NotSent, "image copied", $"{MacNative.FrontmostBundleId()} was in front instead of {this.Target}");
+                    return;
+                }
+
+                if (!this.Current(gen))
+                {
+                    return;
+                }
+
+                this._plugin.ClientApplication.SendKeyboardShortcut(VirtualKeyCode.KeyV, ModifierKey.Command);
+                Thread.Sleep(200);
+                lock (this._lock)
+                {
+                    if (!this.Current(gen) || this.Phase != CapturePhase.Selecting)
+                    {
+                        PluginLog.Info("capture: cancelled after the image was pasted; no recording started");
+                        return;
+                    }
+
+                    this.Phase = CapturePhase.Recording;
+                    this.StartedAt = DateTime.UtcNow;
+                }
+
+                this._redraw();
+                this.BeginRecording(gen);
             }
             catch (Exception ex)
             {
-                PluginLog.Error(ex, "screencapture failed");
+                PluginLog.Error(ex, "capture: area selection failed");
+                this.Finish(gen, CapturePhase.NotSent, "failed");
             }
-
-            if (this.Phase != CapturePhase.Selecting)
-            {
-                return;   // cancelled from the keypad
-            }
-
-            if (MacNative.ClipboardChangeCount() == before)
-            {
-                this.Finish(CapturePhase.Idle, null);
-                return;   // Esc pressed: nothing captured, no recording started
-            }
-
-            // Attach the image to the receiving app's message box, then start recording.
-            MacNative.Activate(this.Target);
-            Thread.Sleep(450);
-            this._plugin.ClientApplication.SendKeyboardShortcut(VirtualKeyCode.KeyV, ModifierKey.Command);
-            Thread.Sleep(200);
-            this.Phase = CapturePhase.Recording;
-            this.StartedAt = DateTime.UtcNow;
-            this._redraw();
-            this.BeginRecording();
         }
 
-        // Second press: stop, let Doing transcribe and paste into the receiving app, then send.
-        public void Stop(Boolean send = true)
+        // Second press on Dictate, or Cancel while recording: stop, and let Doing transcribe and paste
+        // into the receiving app's message box. The text is not sent.
+        public void Stop()
         {
+            Int32 gen;
             lock (this._lock)
             {
                 if (this.Phase != CapturePhase.Recording)
@@ -160,34 +248,47 @@ namespace Loupedeck.AgentKeypadPlugin
                     return;
                 }
 
+                gen = this._generation;
                 this.Phase = CapturePhase.Processing;
                 this.Step = "Transcribing";
+                this.ProcessingSince = DateTime.UtcNow;
             }
 
             this._redraw();
-            var generation = ++this._generation;
-            Task.Delay(30000).ContinueWith(_ =>
+            Task.Delay(45000).ContinueWith(_ =>
             {
-                if (this._generation == generation && this.Phase == CapturePhase.Processing)
+                if (this.Phase == CapturePhase.Processing)
                 {
-                    PluginLog.Warning("capture: no result after 30 s");
-                    this.Finish(CapturePhase.NotSent, "timed out");
+                    PluginLog.Warning("capture: no result after 45 s");
+                    this.Finish(gen, CapturePhase.NotSent, "timed out");
                 }
             });
             Task.Run(() =>
             {
               try
               {
+                var target = this.Target;
                 var before = MacNative.ClipboardChangeCount();
-                PluginLog.Info($"capture: stopping, clipboard count {before}, activating {this.Target}");
-                MacNative.Activate(this.Target);
-                Thread.Sleep(300);
+                PluginLog.Info($"capture: stopping, clipboard count {before}, activating {target}");
+                // Doing pastes into whatever app is in front, so make sure that is the target before stopping it.
+                // Doing has to be stopped either way, or it keeps recording.
+                var inFront = this.BringForward(target);
+                if (!inFront)
+                {
+                    PluginLog.Warning($"capture: {target} is not in front ({MacNative.FrontmostBundleId()}); stopping Doing anyway");
+                }
+
+                if (this._disposed)
+                {
+                    return;
+                }
+
                 MacNative.FnTap();
                 PluginLog.Info("capture: fn sent to stop Doing");
 
                 // Doing copies the transcript to the clipboard and pastes it. Wait for that copy.
                 var watch = Stopwatch.StartNew();
-                while (MacNative.ClipboardChangeCount() == before && watch.Elapsed < TimeSpan.FromSeconds(25))
+                while (MacNative.ClipboardChangeCount() == before && watch.Elapsed < TimeSpan.FromSeconds(25) && this.Current(gen))
                 {
                     Thread.Sleep(100);
                 }
@@ -195,42 +296,42 @@ namespace Loupedeck.AgentKeypadPlugin
                 if (MacNative.ClipboardChangeCount() == before)
                 {
                     PluginLog.Warning("capture: Doing produced no transcript within 25 s");
-                    this.Finish(CapturePhase.NotSent, "no words");
+                    this.Finish(gen, CapturePhase.NotSent, "no words");
                     return;
                 }
 
                 PluginLog.Info("capture: transcript arrived");
 
-                this.Step = "Sending";
+                lock (this._lock)
+                {
+                    if (this.Current(gen))
+                    {
+                        this.Step = "Pasting";
+                    }
+                }
+
                 this._redraw();
                 Thread.Sleep(500);   // let the paste land
 
-                if (!send)
+                var front = MacNative.FrontmostBundleId();
+                if (front != target)
                 {
-                    this.Finish(CapturePhase.NotSent, "not sent");
+                    this.Finish(gen, CapturePhase.NotSent, "text copied", $"{front} was in front instead of {target}");
                     return;
                 }
 
-                if (MacNative.FrontmostBundleId() != this.Target)
-                {
-                    this.Finish(CapturePhase.NotSent, "text copied");
-                    return;
-                }
-
-                MacNative.Return();
-                PluginLog.Info("capture: sent");
-                this.Finish(CapturePhase.Sent, null);
+                this.Finish(gen, CapturePhase.InBox, null);
               }
               catch (Exception ex)
               {
                 PluginLog.Error(ex, "capture: stop failed");
-                this.Finish(CapturePhase.NotSent, "failed");
+                this.Finish(gen, CapturePhase.NotSent, "failed");
               }
             });
         }
 
-        // Sends one line of text to the last AI app: copy it, bring the app forward, paste, and press
-        // Return only if that app is still in front. Returns a reason when it could not send.
+        // Keep in wiki: copy one line of text, bring the last AI app forward, paste it and press Return,
+        // checking at each step. Returns a reason when it could not send.
         public String SendText(String text)
         {
             var target = this.LastAi;
@@ -244,87 +345,166 @@ namespace Loupedeck.AgentKeypadPlugin
                 return "busy";
             }
 
-            var psi = new ProcessStartInfo("/usr/bin/pbcopy") { UseShellExecute = false, RedirectStandardInput = true };
-            using (var p = Process.Start(psi))
+            if (Interlocked.CompareExchange(ref this._sending, 1, 0) != 0)
             {
-                p.StandardInput.Write(text);
-                p.StandardInput.Close();
-                p.WaitForExit(3000);
+                return "busy";
             }
 
-            MacNative.Activate(target);
-            Thread.Sleep(450);
-            if (MacNative.FrontmostBundleId() != target)
+            try
             {
-                return "app not open";
-            }
+                var before = MacNative.ClipboardChangeCount();
+                var psi = new ProcessStartInfo("/usr/bin/pbcopy") { UseShellExecute = false, RedirectStandardInput = true };
+                using (var p = Process.Start(psi))
+                {
+                    p.StandardInput.Write(text);
+                    p.StandardInput.Close();
+                    if (!p.WaitForExit(3000) || p.ExitCode != 0 || MacNative.ClipboardChangeCount() == before)
+                    {
+                        // Without this check, Cmd+V would paste whatever was copied before.
+                        PluginLog.Warning("keep in wiki: could not copy the instruction");
+                        return "copy failed";
+                    }
+                }
 
-            this._plugin.ClientApplication.SendKeyboardShortcut(VirtualKeyCode.KeyV, ModifierKey.Command);
-            Thread.Sleep(250);
-            MacNative.Return();
-            return null;
+                if (!this.BringForward(target))
+                {
+                    return "app not open";
+                }
+
+                this._plugin.ClientApplication.SendKeyboardShortcut(VirtualKeyCode.KeyV, ModifierKey.Command);
+                Thread.Sleep(250);
+                if (MacNative.FrontmostBundleId() != target)
+                {
+                    PluginLog.Warning("keep in wiki: the app changed before Return; not sent");
+                    return "not sent";
+                }
+
+                MacNative.Return();
+                PluginLog.Info($"keep in wiki: sent to {AppName(target)}");
+                return null;
+            }
+            finally
+            {
+                Interlocked.Exchange(ref this._sending, 0);
+            }
         }
 
-        // Cancel: while choosing an area, stops the selection; while recording, stops Doing
-        // and leaves whatever it pastes unsent.
+        // Cancel: while choosing an area, stops the selection; while recording, stops exactly as Dictate does,
+        // because Doing pastes its text either way.
         public Boolean Cancel()
         {
-            switch (this.Phase)
+            Process selector;
+            lock (this._lock)
             {
-                case CapturePhase.Selecting:
-                    this.Phase = CapturePhase.Idle;
-                    try
-                    {
-                        this._selector?.Kill();
-                    }
-                    catch (Exception)
-                    {
-                    }
+                switch (this.Phase)
+                {
+                    case CapturePhase.Selecting:
+                        this.Phase = CapturePhase.Idle;
+                        selector = this._selector;
+                        break;
+                    case CapturePhase.Recording:
+                        selector = null;
+                        break;
+                    default:
+                        return false;
+                }
+            }
 
-                    this._redraw();
-                    return true;
-                case CapturePhase.Recording:
-                    this.Stop(send: false);
-                    return true;
-                default:
-                    return false;
+            if (selector == null)
+            {
+                PluginLog.Info("capture: Cancel pressed while recording; stopping like Dictate");
+                this.Stop();
+                return true;
+            }
+
+            PluginLog.Info("capture: area selection cancelled");
+            TryKill(selector);
+            this._redraw();
+            return true;
+        }
+
+        private static void TryKill(Process p)
+        {
+            try
+            {
+                if (p != null && !p.HasExited)
+                {
+                    p.Kill();
+                }
+            }
+            catch (Exception)
+            {
             }
         }
 
-        // Pressing a finished key clears its Sent or Not sent state.
+        // Pressing a finished key clears its In box or Not sent state.
         public void Clear()
         {
-            if (!this.Busy)
+            lock (this._lock)
             {
+                if (this.Busy)
+                {
+                    return;
+                }
+
                 this.Phase = CapturePhase.Idle;
-                this._redraw();
             }
+
+            this._redraw();
         }
 
-        private void Finish(CapturePhase phase, String note)
+        // Ends capture gen. Work left over from an earlier capture, or from before an unload, changes nothing.
+        private void Finish(Int32 gen, CapturePhase phase, String note, String detail = null)
         {
-            this.Phase = phase;
-            this.Note = note;
+            lock (this._lock)
+            {
+                if (!this.Current(gen))
+                {
+                    PluginLog.Info($"capture: ignored a late {phase} from an earlier capture");
+                    return;
+                }
+
+                this.Phase = phase;
+                this.Note = note;
+            }
+
+            PluginLog.Info($"capture: finished {phase}{(note != null ? ", " + note : "")}{(detail != null ? " (" + detail + ")" : "")}");
             this._redraw();
-            if (phase == CapturePhase.Sent)
+            if (phase == CapturePhase.InBox)
             {
                 Task.Delay(3000).ContinueWith(_ =>
                 {
-                    if (this.Phase == CapturePhase.Sent)
+                    lock (this._lock)
                     {
+                        if (!this.Current(gen) || this.Phase != CapturePhase.InBox)
+                        {
+                            return;
+                        }
+
                         this.Phase = CapturePhase.Idle;
-                        this._redraw();
                     }
+
+                    this._redraw();
                 });
             }
         }
 
-        public String Elapsed()
+        public String Elapsed() => Clock(this.StartedAt);
+
+        public String ProcessingElapsed() => Clock(this.ProcessingSince);
+
+        private static String Clock(DateTime since)
         {
-            var s = (Int32)(DateTime.UtcNow - this.StartedAt).TotalSeconds;
+            var s = Math.Max(0, (Int32)(DateTime.UtcNow - since).TotalSeconds);
             return $"{s / 60}:{s % 60:00}";
         }
 
-        public void Dispose() => this._poll.Dispose();
+        // Stops the poll and any area selection. Background work checks _disposed before it presses keys.
+        public void Dispose()
+        {
+            this._disposed = true;
+            this._poll.Dispose();
+            TryKill(this._selector);
+        }
     }
 }

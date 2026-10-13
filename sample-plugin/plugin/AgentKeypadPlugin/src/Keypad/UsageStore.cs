@@ -96,6 +96,7 @@ namespace Loupedeck.AgentKeypadPlugin
             public Int64 ReadAt { get; set; }
             public Int64 NextTryAt { get; set; }
             public Int32 BackoffMinutes { get; set; }
+            public String Why { get; set; }   // reason for the last failed read, shown until a good read
         }
 
         private static readonly Object ClaudeLock = new();
@@ -113,10 +114,11 @@ namespace Loupedeck.AgentKeypadPlugin
         {
             var state = LoadLive();
             var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-            String why = null;
+            // A clock that jumped forward and back must not stop requests for longer than the longest wait.
+            state.NextTryAt = Math.Min(state.NextTryAt, now + 180 * 60);
             if (now >= state.NextTryAt)
             {
-                var (live, reason) = ClaudeLive();
+                var (live, reason, retryAfter) = ClaudeLive();
                 if (live != null)
                 {
                     state = live;
@@ -126,9 +128,16 @@ namespace Loupedeck.AgentKeypadPlugin
                 }
                 else
                 {
-                    why = reason;
-                    // After a 429 wait 20 minutes, doubling up to an hour; after other failures wait 10 minutes.
-                    state.BackoffMinutes = reason == "error 429" ? Math.Min(state.BackoffMinutes == 0 ? 20 : state.BackoffMinutes * 2, 60) : 10;
+                    // After a 429 wait 20 minutes, doubling up to an hour, and never less than Retry-After.
+                    // A refused or missing Keychain login waits 3 hours, so a Keychain prompt cannot return every 10 minutes.
+                    // Other failures wait 10 minutes.
+                    state.BackoffMinutes = reason switch
+                    {
+                        "error 429" => Math.Max(Math.Min(state.BackoffMinutes == 0 ? 20 : state.BackoffMinutes * 2, 60), (retryAfter + 59) / 60),
+                        "no access" or "no login" => 180,
+                        _ => 10,
+                    };
+                    state.Why = reason;
                     state.NextTryAt = now + state.BackoffMinutes * 60;
                     PluginLog.Info($"Claude usage: next request in {state.BackoffMinutes} minutes");
                 }
@@ -142,7 +151,7 @@ namespace Loupedeck.AgentKeypadPlugin
             }
 
             // No good read yet: show why on the key.
-            var shown = why == "error 429" || (why == null && state.BackoffMinutes > 0) ? "rate limited" : why ?? "waiting";
+            var shown = state.Why == "error 429" ? "rate limited" : state.Why ?? "waiting";
             var fallback = ClaudeFromStatusLine();
             fallback.fiveHour.Why ??= shown;
             fallback.week.Why ??= shown;
@@ -194,7 +203,7 @@ namespace Loupedeck.AgentKeypadPlugin
             }
         }
 
-        private static (LiveState state, String why) ClaudeLive()
+        private static (LiveState state, String why, Int32 retryAfter) ClaudeLive()
         {
             try
             {
@@ -215,7 +224,7 @@ namespace Loupedeck.AgentKeypadPlugin
                     {
                         p.Kill();
                         PluginLog.Info("Claude usage: Keychain read timed out");
-                        return (null, "no access");
+                        return (null, "no access", 0);
                     }
 
                     stored = output.GetAwaiter().GetResult().Trim();
@@ -225,7 +234,7 @@ namespace Loupedeck.AgentKeypadPlugin
                 if (code != 0 || String.IsNullOrEmpty(stored))
                 {
                     PluginLog.Info($"Claude usage: Keychain read exited {code}");
-                    return (null, code == 44 ? "no login" : "no access");
+                    return (null, code == 44 ? "no login" : "no access", 0);
                 }
 
                 String token;
@@ -237,7 +246,7 @@ namespace Loupedeck.AgentKeypadPlugin
                         && DateTimeOffset.FromUnixTimeMilliseconds(exp.GetInt64()) < DateTimeOffset.UtcNow)
                     {
                         PluginLog.Info("Claude usage: the stored login has expired; it renews the next time Claude Code runs");
-                        return (null, "login expired");
+                        return (null, "login expired", 0);
                     }
                 }
 
@@ -248,26 +257,36 @@ namespace Loupedeck.AgentKeypadPlugin
                 if (!response.IsSuccessStatusCode)
                 {
                     PluginLog.Info($"Claude usage: request returned {(Int32)response.StatusCode}");
-                    return (null, $"error {(Int32)response.StatusCode}");
+                    var retry = response.Headers.RetryAfter;
+                    var retryAfter = retry?.Delta is TimeSpan d ? (Int32)d.TotalSeconds
+                        : retry?.Date is DateTimeOffset at ? (Int32)(at - DateTimeOffset.UtcNow).TotalSeconds : 0;
+                    return (null, $"error {(Int32)response.StatusCode}", Math.Clamp(retryAfter, 0, 3 * 3600));
                 }
 
                 using var doc = JsonDocument.Parse(response.Content.ReadAsStringAsync().GetAwaiter().GetResult());
                 var state = new LiveState();
                 (state.FivePct, state.FiveReset) = ReadWindow(doc.RootElement, "five_hour");
                 (state.WeekPct, state.WeekReset) = ReadWindow(doc.RootElement, "seven_day");
+                if (state.FivePct == null && state.WeekPct == null)
+                {
+                    // A reply without either window must not replace the last good numbers.
+                    PluginLog.Info("Claude usage: the reply had no usage windows");
+                    return (null, "bad reply", 0);
+                }
+
                 PluginLog.Info("Claude usage: read from Anthropic");
-                return (state, null);
+                return (state, null, 0);
             }
             catch (HttpRequestException ex)
             {
                 // The Mac could not reach Anthropic (no network, or the address did not resolve).
                 PluginLog.Info($"Claude usage: could not reach Anthropic ({ex.InnerException?.Message ?? ex.Message})");
-                return (null, "offline");
+                return (null, "offline", 0);
             }
             catch (Exception ex)
             {
                 PluginLog.Info($"Claude usage: live read failed ({ex.GetType().Name})");
-                return (null, "read failed");
+                return (null, "read failed", 0);
             }
         }
 
