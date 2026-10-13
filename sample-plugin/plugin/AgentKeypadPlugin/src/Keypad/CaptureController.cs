@@ -1,6 +1,7 @@
 namespace Loupedeck.AgentKeypadPlugin
 {
     using System;
+    using System.Collections.Generic;
     using System.Diagnostics;
     using System.Threading;
     using System.Threading.Tasks;
@@ -353,6 +354,18 @@ namespace Loupedeck.AgentKeypadPlugin
                 return "busy";
             }
 
+            // Keep what the user had copied, and put it back after the paste.
+            List<List<(String type, Byte[] data)>> saved = null;
+            try
+            {
+                saved = MacNative.SaveClipboard();
+            }
+            catch (Exception ex)
+            {
+                PluginLog.Warning(ex, "keep in wiki: could not save the clipboard; it will not be restored");
+            }
+
+            var ours = -1L;
             try
             {
                 var before = MacNative.ClipboardChangeCount();
@@ -368,6 +381,8 @@ namespace Loupedeck.AgentKeypadPlugin
                         return "copy failed";
                     }
                 }
+
+                ours = MacNative.ClipboardChangeCount();
 
                 if (!this.BringForward(target))
                 {
@@ -389,6 +404,17 @@ namespace Loupedeck.AgentKeypadPlugin
             }
             finally
             {
+                if (ours >= 0 && saved != null)
+                {
+                    Thread.Sleep(400);   // the app reads the clipboard when it handles Cmd+V
+                    // Only if nothing else was copied in the meantime; a newer copy is the user's and stays.
+                    if (MacNative.ClipboardChangeCount() == ours)
+                    {
+                        var restored = MacNative.RestoreClipboard(saved);
+                        PluginLog.Info($"keep in wiki: clipboard {(restored ? "restored" : "could not be restored")} ({saved.Count} item(s))");
+                    }
+                }
+
                 Interlocked.Exchange(ref this._sending, 0);
             }
         }

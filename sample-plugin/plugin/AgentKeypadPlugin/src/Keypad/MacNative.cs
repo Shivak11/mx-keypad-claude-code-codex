@@ -1,6 +1,7 @@
 namespace Loupedeck.AgentKeypadPlugin
 {
     using System;
+    using System.Collections.Generic;
     using System.Diagnostics;
     using System.Runtime.InteropServices;
     using System.Threading;
@@ -16,6 +17,14 @@ namespace Loupedeck.AgentKeypadPlugin
         [DllImport(ObjC)] private static extern IntPtr sel_registerName(String name);
         [DllImport(ObjC, EntryPoint = "objc_msgSend")] private static extern IntPtr Send(IntPtr receiver, IntPtr selector);
         [DllImport(ObjC, EntryPoint = "objc_msgSend")] private static extern Int64 SendLong(IntPtr receiver, IntPtr selector);
+        [DllImport(ObjC, EntryPoint = "objc_msgSend")] private static extern IntPtr SendPtr(IntPtr receiver, IntPtr selector, IntPtr arg);
+        [DllImport(ObjC, EntryPoint = "objc_msgSend")] private static extern IntPtr SendIndex(IntPtr receiver, IntPtr selector, UInt64 index);
+        [DllImport(ObjC, EntryPoint = "objc_msgSend")] private static extern IntPtr SendBytes(IntPtr receiver, IntPtr selector, Byte[] bytes, UInt64 length);
+        [DllImport(ObjC, EntryPoint = "objc_msgSend")] private static extern Boolean SendTwo(IntPtr receiver, IntPtr selector, IntPtr a, IntPtr b);
+        [DllImport(ObjC, EntryPoint = "objc_msgSend")] private static extern Boolean SendBool(IntPtr receiver, IntPtr selector, IntPtr a);
+        [DllImport(ObjC, EntryPoint = "objc_msgSend")] private static extern IntPtr SendStr(IntPtr receiver, IntPtr selector, String utf8);
+        [DllImport(ObjC)] private static extern IntPtr objc_autoreleasePoolPush();
+        [DllImport(ObjC)] private static extern void objc_autoreleasePoolPop(IntPtr pool);
 
         [DllImport(CG)] private static extern IntPtr CGEventCreateKeyboardEvent(IntPtr source, UInt16 keycode, Boolean keyDown);
         [DllImport(CG)] private static extern void CGEventSetFlags(IntPtr evt, UInt64 flags);
@@ -44,6 +53,133 @@ namespace Loupedeck.AgentKeypadPlugin
             catch (Exception)
             {
                 return null;
+            }
+        }
+
+        private static IntPtr Sel(String name) => sel_registerName(name);
+
+        // NSPasteboard lives in AppKit. Logi Plugin Service loads it already; loading it here makes sure.
+        private static readonly Boolean AppKit = NativeLibrary.TryLoad("/System/Library/Frameworks/AppKit.framework/AppKit", out _);
+
+        // The general pasteboard, or a named one (used by the clipboard test so the real clipboard is left alone).
+        private static IntPtr Pasteboard(String name) =>
+            name == null
+                ? Send(objc_getClass("NSPasteboard"), Sel("generalPasteboard"))
+                : SendPtr(objc_getClass("NSPasteboard"), Sel("pasteboardWithName:"), SendStr(objc_getClass("NSString"), Sel("stringWithUTF8String:"), name));
+
+        // Every item on the clipboard with every type it offers (plain text, rich text, image, file, ...).
+        public static List<List<(String type, Byte[] data)>> SaveClipboard(String pasteboard = null)
+        {
+            if (!AppKit)
+            {
+                throw new InvalidOperationException("AppKit is not available");
+            }
+
+            var pool = objc_autoreleasePoolPush();
+            try
+            {
+                var saved = new List<List<(String, Byte[])>>();
+                var pb = Pasteboard(pasteboard);
+                if (pb == IntPtr.Zero)
+                {
+                    throw new InvalidOperationException("no pasteboard");
+                }
+
+                var items = Send(pb, Sel("pasteboardItems"));
+                var count = items == IntPtr.Zero ? 0 : SendLong(items, Sel("count"));
+                for (var i = 0L; i < count; i++)
+                {
+                    var item = SendIndex(items, Sel("objectAtIndex:"), (UInt64)i);
+                    var types = Send(item, Sel("types"));
+                    var entry = new List<(String, Byte[])>();
+                    for (var t = 0L; t < SendLong(types, Sel("count")); t++)
+                    {
+                        var type = SendIndex(types, Sel("objectAtIndex:"), (UInt64)t);
+                        var data = SendPtr(item, Sel("dataForType:"), type);
+                        var typeName = NsString(type);
+                        if (data == IntPtr.Zero || typeName == null)
+                        {
+                            continue;
+                        }
+
+                        var bytes = new Byte[SendLong(data, Sel("length"))];
+                        if (bytes.Length > 0)
+                        {
+                            Marshal.Copy(Send(data, Sel("bytes")), bytes, 0, bytes.Length);
+                        }
+
+                        entry.Add((typeName, bytes));
+                    }
+
+                    saved.Add(entry);
+                }
+
+                return saved;
+            }
+            finally
+            {
+                objc_autoreleasePoolPop(pool);
+            }
+        }
+
+        // Puts back what SaveClipboard returned. Returns false if the clipboard could not be written.
+        public static Boolean RestoreClipboard(List<List<(String type, Byte[] data)>> saved, String pasteboard = null)
+        {
+            if (!AppKit || saved == null)
+            {
+                return false;
+            }
+
+            var pool = objc_autoreleasePoolPush();
+            try
+            {
+                var pb = Pasteboard(pasteboard);
+                if (pb == IntPtr.Zero)
+                {
+                    return false;
+                }
+
+                SendLong(pb, Sel("clearContents"));
+                if (saved.Count == 0)
+                {
+                    return true;
+                }
+
+                // Any nil here would raise an Objective-C exception, which ends the whole plugin service, so check each one.
+                var array = Send(objc_getClass("NSMutableArray"), Sel("array"));
+                var itemClass = objc_getClass("NSPasteboardItem");
+                if (array == IntPtr.Zero || itemClass == IntPtr.Zero)
+                {
+                    return false;
+                }
+
+                foreach (var entry in saved)
+                {
+                    var item = Send(Send(itemClass, Sel("alloc")), Sel("init"));
+                    if (item == IntPtr.Zero)
+                    {
+                        return false;
+                    }
+
+                    foreach (var (type, data) in entry)
+                    {
+                        var nsData = SendBytes(objc_getClass("NSData"), Sel("dataWithBytes:length:"), data ?? Array.Empty<Byte>(), (UInt64)(data?.Length ?? 0));
+                        var nsType = type == null ? IntPtr.Zero : SendStr(objc_getClass("NSString"), Sel("stringWithUTF8String:"), type);
+                        if (nsData != IntPtr.Zero && nsType != IntPtr.Zero)
+                        {
+                            SendTwo(item, Sel("setData:forType:"), nsData, nsType);
+                        }
+                    }
+
+                    SendPtr(array, Sel("addObject:"), item);
+                    Send(item, Sel("release"));
+                }
+
+                return SendBool(pb, Sel("writeObjects:"), array);
+            }
+            finally
+            {
+                objc_autoreleasePoolPop(pool);
             }
         }
 

@@ -18,7 +18,13 @@ Never chain keystrokes on a guess. A Clipboard key that pressed Command+Space an
 
 ## Sending text to the agent
 
-Copy the text with `pbcopy`, activate the target app, check it is in front, paste with Command+V, check again, and press Return. If any check fails, leave the text on the clipboard and show "Not sent". Add a watchdog (about 30 s) so the key always ends on Sent or Not sent.
+For a fixed instruction (not dictation): save the clipboard, copy the text with `pbcopy` and check the change count rose, activate the target app and wait until it is in front plus about 450 ms for the message box to take focus, paste with Command+V, check again, press Return, then restore the clipboard. If any check fails, show "Not sent". Add a watchdog so a key always ends.
+
+## Saving and restoring the clipboard
+
+To paste your own text without losing what the user copied, save every item on the pasteboard with every type (`pasteboardItems`, then `types` and `dataForType:` for each), paste, wait about 400 ms for the app to read it, and write the items back as new `NSPasteboardItem`s with `writeObjects:`. Skip the restore if `changeCount` moved since your copy, because the user copied something newer. macOS can add derived types when content is written (rich text gained a UTF-16 plain-text type), so compare a restore against what you saved, not against what you first wrote.
+
+Test it on a named pasteboard (`pasteboardWithName:`), never the user's clipboard. Check every Objective-C object for nil before adding it to an array: in a test program without AppKit loaded, `NSPasteboardItem` was nil and `addObject:` raised an Objective-C exception, which ends the whole process. Inside Logi Plugin Service that would stop every plugin. Load AppKit explicitly.
 
 ## Screenshots
 

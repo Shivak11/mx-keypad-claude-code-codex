@@ -44,6 +44,8 @@ codex://threads/<thread id>
 
 Open with `/usr/bin/open <url>`. Opening a "ready" session should mark it read.
 
+The user also reads results in the app itself, so clear Ready there too. Claude's record has `lastFocusedAt`, which changes only when the user switches to a session, not while they keep looking at it. Treat a session as read when `lastFocusedAt` is later than the finish time, or when Claude is in front and the session has the latest `lastFocusedAt` of all (it is on screen as it finishes). Save the read mark, or Ready returns when the user looks away.
+
 ## Approving from the keypad
 
 Not built in the sample. Claude's `PermissionRequest` hook can return allow or deny, but it runs before the dialog appears, so a keypad answer would have to press keys in the visible dialog. Observe each app's dialog first, open the session, and only then show that app's own options. Never approve on a guess.

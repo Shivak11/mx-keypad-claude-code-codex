@@ -15,7 +15,7 @@ namespace Loupedeck.AgentKeypadPlugin
         public String Id;         // id from the hook (Claude CLI session id or Codex thread id)
         public String State;      // working, waiting, idle
         public String Wait;       // Permission, Approval, Question
-        public Boolean Ready;     // finished a turn that has not been opened from the keypad
+        public Boolean Ready;     // finished a turn that has not been opened since, from the keypad or (Claude) in the app
         public Double Updated;
         public Double ReadyAt;
         public Double WaitSince;
@@ -44,11 +44,11 @@ namespace Loupedeck.AgentKeypadPlugin
         private Timer _debounce;
         private Timer _tick;
         private List<Session> _sessions = new();
-        private Dictionary<String, (String link, String title, Boolean archived, Double active, String cwd)> _claude = new();
+        private Dictionary<String, (String link, String title, Boolean archived, Double active, String cwd, Double focused)> _claude = new();
         private Dictionary<String, (String title, String cwd, Double updated)> _codex = new();   // threads you started, not helper agents
         private DateTime _titlesLoaded = DateTime.MinValue;
         private const Double StaleWorkingSeconds = 20 * 60;
-        private readonly Dictionary<String, (DateTime stamp, String cli, (String, String, Boolean, Double, String) entry)> _claudeFiles = new();
+        private readonly Dictionary<String, (DateTime stamp, String cli, (String, String, Boolean, Double, String, Double) entry)> _claudeFiles = new();
 
         public SessionStore(Action changed)
         {
@@ -186,12 +186,18 @@ namespace Loupedeck.AgentKeypadPlugin
             }
 
             var sinceTitles = DateTime.UtcNow - this._titlesLoaded;
-            if ((list.Any(s => !this.Known(s)) && sinceTitles > TimeSpan.FromSeconds(5)) || sinceTitles > TimeSpan.FromSeconds(60))
+            // While a Claude session is Ready, read the app's records every 10 s, so opening it there clears Ready soon.
+            if ((list.Any(s => !this.Known(s)) && sinceTitles > TimeSpan.FromSeconds(5))
+                || (list.Any(s => s.Ready && s.App == "claude") && sinceTitles > TimeSpan.FromSeconds(10))
+                || sinceTitles > TimeSpan.FromSeconds(60))
             {
                 this.LoadTitles();
             }
 
             var shown = new List<Session>();
+            var claudeInFront = MacNative.FrontmostBundleId() == CaptureController.ClaudeBundle;
+            var lastFocused = this._claude.Count == 0 ? null : this._claude.MaxBy(kv => kv.Value.focused).Key;
+            var readInApp = new List<Session>();
             foreach (var s in list)
             {
                 if (s.App == "claude" && this._claude.TryGetValue(s.Id, out var c))
@@ -203,6 +209,22 @@ namespace Loupedeck.AgentKeypadPlugin
 
                     s.LinkId = c.link;
                     s.Title = c.title;
+
+                    // Seeing the result in the Claude app counts as reading it, as opening it from the keypad does:
+                    // either the session was switched to after it finished, or Claude is in front with this
+                    // session as the one switched to most recently.
+                    if (s.Ready && s.ReadyAt > 0)
+                    {
+                        var why = c.focused > s.ReadyAt ? "opened in Claude after it finished"
+                            : claudeInFront && s.Id == lastFocused ? "on screen in Claude"
+                            : null;
+                        if (why != null)
+                        {
+                            s.Ready = false;
+                            readInApp.Add(s);
+                            PluginLog.Info($"session {s.Id[..Math.Min(8, s.Id.Length)]} {why}; no longer Ready");
+                        }
+                    }
                 }
                 else if (s.App == "codex")
                 {
@@ -215,6 +237,12 @@ namespace Loupedeck.AgentKeypadPlugin
                 }
 
                 shown.Add(s);
+            }
+
+            // Save the read mark, so Ready does not come back once the session is no longer on screen.
+            foreach (var s in readInApp)
+            {
+                this.MarkRead(s);
             }
 
             // Sessions that have not reported through the hooks yet still appear, from each app's own records.
@@ -249,7 +277,7 @@ namespace Loupedeck.AgentKeypadPlugin
 
         private void LoadTitles()
         {
-            var claude = new Dictionary<String, (String, String, Boolean, Double, String)>();
+            var claude = new Dictionary<String, (String, String, Boolean, Double, String, Double)>();
             foreach (var file in SafeFiles(ClaudeSessions, "local_*.json", SearchOption.AllDirectories))
             {
                 try
@@ -274,8 +302,10 @@ namespace Loupedeck.AgentKeypadPlugin
                         var archived = r.TryGetProperty("isArchived", out var a) && a.ValueKind == JsonValueKind.True;
                         var active = r.TryGetProperty("lastActivityAt", out var la) && la.ValueKind == JsonValueKind.Number ? la.GetDouble() / 1000 : 0;
                         var cwd = r.TryGetProperty("cwd", out var cw) && cw.ValueKind == JsonValueKind.String ? cw.GetString() : null;
-                        claude[cli.GetString()] = (link, title, archived, active, cwd);
-                        this._claudeFiles[file] = (stamp, cli.GetString(), (link, title, archived, active, cwd));
+                        // When the session was last switched to in the Claude app.
+                        var focused = r.TryGetProperty("lastFocusedAt", out var lf) && lf.ValueKind == JsonValueKind.Number ? lf.GetDouble() / 1000 : 0;
+                        claude[cli.GetString()] = (link, title, archived, active, cwd, focused);
+                        this._claudeFiles[file] = (stamp, cli.GetString(), (link, title, archived, active, cwd, focused));
                     }
                 }
                 catch (Exception)
