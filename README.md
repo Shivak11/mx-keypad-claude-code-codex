@@ -17,7 +17,7 @@ The skill is in [`skills/mx-keypad-skill`](skills/mx-keypad-skill/SKILL.md). You
 - Screens, lists, More, Back and Home, and switching Options+ pages
 - Showing which Claude Code and Codex sessions are working, waiting or finished, using lifecycle hooks that never store prompt text
 - Opening the exact session, and opening the page from each app's built-in browser panel in another browser
-- Sending dictation and screenshots to the last AI window, with checks before pressing Return
+- Putting dictation and screenshots into the last AI window's message box, with a check that the window is in front; the user presses Enter
 - Reading Claude and Codex five-hour and weekly usage limits without getting rate limited
 - Proving changes without touching the device: rendering keys to PNG and running probes inside the plugin
 

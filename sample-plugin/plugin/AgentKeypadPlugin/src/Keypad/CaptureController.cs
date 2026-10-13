@@ -47,6 +47,7 @@ namespace Loupedeck.AgentKeypadPlugin
 
         public Boolean Busy => this.Phase is CapturePhase.Selecting or CapturePhase.Recording or CapturePhase.Processing;
 
+        private const Int32 SettleMs = 450;   // after an app comes to the front, before pasting into it
         private Int32 _ticks;
         private Int32 _generation;   // one number per capture; work from an older capture may not change the key
         private Int32 _sending;      // 1 while Keep in wiki is pasting
@@ -207,6 +208,7 @@ namespace Loupedeck.AgentKeypadPlugin
                     return;
                 }
 
+                Thread.Sleep(SettleMs);   // the app is in front; give its message box time to take keyboard focus
                 if (!this.Current(gen))
                 {
                     return;
@@ -278,6 +280,7 @@ namespace Loupedeck.AgentKeypadPlugin
                     PluginLog.Warning($"capture: {target} is not in front ({MacNative.FrontmostBundleId()}); stopping Doing anyway");
                 }
 
+                Thread.Sleep(300);   // let the app take focus before Doing pastes into it
                 if (this._disposed)
                 {
                     return;
@@ -371,6 +374,7 @@ namespace Loupedeck.AgentKeypadPlugin
                     return "app not open";
                 }
 
+                Thread.Sleep(SettleMs);
                 this._plugin.ClientApplication.SendKeyboardShortcut(VirtualKeyCode.KeyV, ModifierKey.Command);
                 Thread.Sleep(250);
                 if (MacNative.FrontmostBundleId() != target)
