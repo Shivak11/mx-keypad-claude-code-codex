@@ -28,7 +28,7 @@ namespace Loupedeck.AgentKeypadPlugin
             this._disposed = true;
             this._idleTimer.Dispose();
             this._usageTimer.Dispose();
-            this._pulseTimer.Dispose();
+            this._animTimer.Dispose();
             this._capture.Dispose();
             this._sessions.Dispose();
         }
@@ -40,7 +40,13 @@ namespace Loupedeck.AgentKeypadPlugin
         private readonly CaptureController _capture;
         private String _lastAiBeforeDia;
         private readonly Timer _usageTimer;
-        private readonly Timer _pulseTimer;
+        private readonly Timer _animTimer;
+        private readonly Action<String> _redrawKey;
+        private readonly Dictionary<String, KeyAnim> _anims = new();            // one-off effects per key id
+        private readonly Dictionary<String, Int32> _lastBadge = new();          // badge per key id, to roll changes
+        private readonly Dictionary<String, String> _lastStatus = new();        // status per session, to notice a finish
+        private readonly Dictionary<String, Double> _arrivedAt = new();         // when each session finished
+        private Double _usageShownAt = -1e9;
         private readonly Timer _idleTimer;
         private volatile Boolean _disposed;
         private Int32 _diaBusy;
@@ -65,15 +71,21 @@ namespace Loupedeck.AgentKeypadPlugin
 
         private readonly Dictionary<String, Int32> _pageNo = new() { ["h"] = 0, ["m"] = 0 };
         private readonly Dictionary<String, String> _flash = new();   // key id -> temporary label ("Opened", "Done")
-        private readonly HashSet<String> _pressed = new();
         private readonly Dictionary<String, String> _denied = new();  // key id -> reason shown while denied
         private readonly Dictionary<String, Int64> _pressTicks = new();
         private (Limit five, Limit week) _codexUsage = (new Limit(), new Limit());
         private (Limit five, Limit week) _claudeUsage = (new Limit(), new Limit());
 
-        public KeypadController(Plugin plugin, Action redraw)
+        public KeypadController(Plugin plugin, Action redraw, Action<String> redrawKey)
         {
             this._plugin = plugin;
+            this._redrawKey = id =>
+            {
+                if (!this._disposed)
+                {
+                    redrawKey(id);
+                }
+            };
             this._redraw = () =>
             {
                 if (!this._disposed)
@@ -84,7 +96,7 @@ namespace Loupedeck.AgentKeypadPlugin
             this._sessions = new SessionStore(redraw);
             this._capture = new CaptureController(plugin, redraw);
             this._usageTimer = new Timer(_ => this.RefreshUsage(), null, 0, 600000);
-            this._pulseTimer = new Timer(_ => this.PulseTick(), null, 250, 250);
+            this._animTimer = new Timer(_ => this.AnimTick(), null, Motion.FrameMs, Motion.FrameMs);
             this._idleTimer = new Timer(_ => this.IdleTick(), null, IdleCheckMs, IdleCheckMs);
         }
 
@@ -125,13 +137,13 @@ namespace Loupedeck.AgentKeypadPlugin
             }
 
             var face = this.FaceFor(id);
-            Boolean pressed;
             String deniedWhy;
+            KeyAnim anim;
             lock (this._lock)
             {
-                pressed = this._pressed.Contains(id);
                 this._denied.TryGetValue(id, out deniedWhy);
-                if (pressed && this._pressTicks.TryGetValue(id, out var t))
+                anim = this.AnimFor(id, face);
+                if (anim.Now - anim.PressAt < 200 && this._pressTicks.TryGetValue(id, out var t))
                 {
                     PluginLog.Verbose($"redraw {id} {Stopwatch.GetElapsedTime(t).TotalMilliseconds:F0} ms after press");
                 }
@@ -145,7 +157,7 @@ namespace Loupedeck.AgentKeypadPlugin
             KeyRenderer.DebugName = id;
             try
             {
-                return KeyRenderer.Draw(face, size, pressed, deniedWhy != null);
+                return KeyRenderer.Draw(face, size, deniedWhy != null, anim);
             }
             catch (Exception ex)
             {
@@ -267,7 +279,7 @@ namespace Loupedeck.AgentKeypadPlugin
                 this.CaptureFace("voice", "h4"),
                 this._capture.Phase == CapturePhase.Recording
                     ? new KeyFace { Icon = "stop", IconColor = Colors.Red, Label = "Stop", Act = () => this._capture.Cancel() }
-                    : this._capture.Phase == CapturePhase.Selecting
+                    : this._capture.Phase is CapturePhase.Selecting or CapturePhase.Processing
                     ? new KeyFace { Icon = "x", IconColor = Colors.Slate, Label = "Cancel", Act = () => this._capture.Cancel() }
                     : new KeyFace { Icon = "x", IconColor = Colors.Slate, Label = "Cancel", Tone = KeyTone.Off, Why = "nothing to stop" },
                 new KeyFace { Icon = "dia", IconColor = Colors.Violet, Label = "Open in Dia", Act = () => this.OpenInDia("h6") },
@@ -307,11 +319,11 @@ namespace Loupedeck.AgentKeypadPlugin
             var to = CaptureController.AppName(c.Target);
             return c.Phase switch
             {
-                CapturePhase.Selecting => new KeyFace { Icon = "area", IconColor = Colors.Blue, Label = "Drag area", Small = "Esc to cancel", Tone = KeyTone.Selecting },
-                CapturePhase.Recording => new KeyFace { Icon = "stop", IconColor = Colors.Red, Label = "Stop", Small = $"{c.Elapsed()} · {to}", Tone = KeyTone.Recording, Act = () => c.Stop() },
-                CapturePhase.Processing => new KeyFace { Icon = "spin", IconColor = Colors.Amber, Label = c.Step ?? "Working", Small = $"{c.ProcessingElapsed()} · {to}", Tone = KeyTone.Sending },
-                CapturePhase.InBox => new KeyFace { Icon = "check", IconColor = Colors.Green, Label = "In box", Small = to, Tone = KeyTone.Sent, Act = c.Clear },
-                CapturePhase.NotSent => new KeyFace { Icon = "clip", IconColor = Colors.Slate, Label = "Not sent", Small = c.Note, Tone = KeyTone.NotSent, Act = c.Clear },
+                CapturePhase.Selecting => new KeyFace { Icon = "area", IconColor = Colors.Blue, Label = "Drag area", Small = "Esc to cancel", Tone = KeyTone.Selecting, Live = "selecting", LiveSince = c.PhaseSince },
+                CapturePhase.Recording => new KeyFace { Icon = "stop", IconColor = Colors.Red, Label = "Stop", Small = $"{c.Elapsed()} · {to}", Tone = KeyTone.Recording, Live = "recording", LiveSince = c.PhaseSince, Act = () => c.Stop() },
+                CapturePhase.Processing => new KeyFace { Icon = "spin", IconColor = Colors.Amber, Label = c.Step ?? "Working", Small = $"{c.ProcessingElapsed()} · {to}", Tone = KeyTone.Sending, Live = "processing", LiveSince = c.PhaseSince, Act = () => c.Cancel() },
+                CapturePhase.InBox => new KeyFace { Icon = "check", IconColor = Colors.Green, Label = "In box", Small = "Enter to send", Tone = KeyTone.Sent, Live = "inbox", LiveSince = c.PhaseSince, LiveLength = 3000, Act = c.Clear },
+                CapturePhase.NotSent => new KeyFace { Icon = "clip", IconColor = Colors.Slate, Label = "Not sent", Small = c.Note, Tone = KeyTone.NotSent, Live = "notsent", LiveSince = c.PhaseSince, LiveLength = 5000, Act = c.Clear },
                 _ => idle,
             };
         }
@@ -435,6 +447,7 @@ namespace Loupedeck.AgentKeypadPlugin
                 Percent = l?.Percent,
                 Value = l?.Percent is Double p ? $"{p:0}%" : null,
                 Small = l?.Percent != null ? (l.Resets != null ? "resets " + l.Resets : null) : fallback,
+                ShownAt = this._usageShownAt,
                 Act = () => { },
             };
 
@@ -481,7 +494,7 @@ namespace Loupedeck.AgentKeypadPlugin
 
             // More moves forward one page and Back moves back one page, so the last page shows no More key.
             faces[6] = page + 1 < pages
-                ? new KeyFace { Kind = KeyKind.Nav, Icon = "next", Label = "More", Small = $"{page + 1} of {pages}", Act = () => { lock (this._lock) { this._pageNo[group] = Math.Min(this._pageNo[group] + 1, pages - 1); } } }
+                ? new KeyFace { Kind = KeyKind.Nav, Icon = "next", Label = "More", Small = $"{page + 1} of {pages}", Act = () => this.ChangeScreen(group, () => { lock (this._lock) { this._pageNo[group] = Math.Min(this._pageNo[group] + 1, pages - 1); } }) }
                 : KeyFace.Empty();
             faces[7] = Nav("back", "Back", () => this.Back(group));
             faces[8] = Nav("home", "Home", () => this.Go(group, "home"));
@@ -521,6 +534,7 @@ namespace Loupedeck.AgentKeypadPlugin
             return new KeyFace
             {
                 Kind = KeyKind.Session,
+                SessionId = s.App + "-" + s.Id,
                 App = s.App,
                 Label = s.Title,
                 Status = status,
@@ -550,19 +564,12 @@ namespace Loupedeck.AgentKeypadPlugin
             lock (this._lock)
             {
                 this._downFaces[id] = (face, Stopwatch.GetTimestamp());
-                this._pressed.Add(id);
                 this._pressTicks[id] = Stopwatch.GetTimestamp();
+                this.Anim(id).PressAt = Motion.Now;   // dip and ring, drawn by the animation timer
                 this.MarkActivity();
             }
 
-            this._redraw();
-            this.After(160, () =>
-            {
-                lock (this._lock)
-                {
-                    this._pressed.Remove(id);
-                }
-            });
+            this._redrawKey(id);
         }
 
         // Runs the action of the face the key showed on the downstroke, so a list that reorders or a state that
@@ -604,7 +611,9 @@ namespace Loupedeck.AgentKeypadPlugin
             this._redraw();
         }
 
-        private void Go(String group, String page)
+        private void Go(String group, String page) => this.ChangeScreen(group, () => this.GoCore(group, page));
+
+        private void GoCore(String group, String page)
         {
             lock (this._lock)
             {
@@ -631,7 +640,9 @@ namespace Loupedeck.AgentKeypadPlugin
             }
         }
 
-        private void Back(String group)
+        private void Back(String group) => this.ChangeScreen(group, () => this.BackCore(group));
+
+        private void BackCore(String group)
         {
             lock (this._lock)
             {
@@ -650,42 +661,132 @@ namespace Loupedeck.AgentKeypadPlugin
             }
         }
 
-        // Redraws only while a list page showing a working session is open, so the border pulses without constant redraws.
-        private void PulseTick()
+        // Caller holds _lock. The key's one-off effects, plus what follows from its face: a badge that changed,
+        // a session that just finished, and the countdown before the idle return.
+        private KeyAnim AnimFor(String id, KeyFace face)
+        {
+            var now = Motion.Now;
+            var stored = this._anims.GetValueOrDefault(id);
+            var anim = new KeyAnim { Now = now };
+            if (stored != null)
+            {
+                anim.PressAt = stored.PressAt;
+                anim.FlashAt = stored.FlashAt;
+                anim.BadgeAt = stored.BadgeAt;
+                anim.BadgeFrom = stored.BadgeFrom;
+            }
+
+            // A badge that changed since this key was last drawn rolls to its new number.
+            if (face.Badge > 0 || this._lastBadge.ContainsKey(id))
+            {
+                if (this._lastBadge.TryGetValue(id, out var before) && before != face.Badge)
+                {
+                    stored = this.Anim(id);
+                    stored.BadgeAt = anim.BadgeAt = now;
+                    stored.BadgeFrom = anim.BadgeFrom = before;
+                }
+
+                this._lastBadge[id] = face.Badge;
+            }
+
+            // A session that turns Ready plays its finish once, on whichever key shows it.
+            if (face.Kind == KeyKind.Session && face.SessionId != null)
+            {
+                if (this._lastStatus.TryGetValue(face.SessionId, out var was) && was != "Ready" && face.Status == "Ready")
+                {
+                    this._arrivedAt[face.SessionId] = now;
+                }
+
+                this._lastStatus[face.SessionId] = face.Status;
+                anim.ArriveAt = this._arrivedAt.GetValueOrDefault(face.SessionId, -1e9);
+            }
+
+            // The last five seconds before the idle return: the Home key drains a ring, the other keys dim.
+            var left = (IdleReturnAfter - (DateTime.UtcNow - this._lastActivity)).TotalMilliseconds;
+            var group = id.Substring(0, 1);
+            var onHome = this._shownGroup == "h" && this._stacks["h"].Count == 1 && this._pageNo["h"] == 0;
+            if (!this._idleReturned && !onHome && !this._capture.Busy && left > 0 && left < IdleWarnMs && (this._shownGroup == null || this._shownGroup == group))
+            {
+                var frac = left / IdleWarnMs;
+                if (id is "h8" or "m8" or "x0" && face.Icon == "home")
+                {
+                    anim.IdleRing = frac;
+                    anim.IdleSmall = $"in {Math.Ceiling(left / 1000):0} s";
+                }
+                else
+                {
+                    anim.Dim = (1 - frac) * 0.45;
+                }
+            }
+
+            return anim;
+        }
+
+        // Caller holds _lock.
+        private KeyAnim Anim(String id)
+        {
+            if (!this._anims.TryGetValue(id, out var a))
+            {
+                a = this._anims[id] = new KeyAnim();
+            }
+
+            return a;
+        }
+
+        private const Double IdleWarnMs = 5000;
+
+        // Eight times a second: redraw only the keys on the visible page that are moving.
+        private void AnimTick()
         {
             try
             {
-                // The spinner on a transcribing or pasting key turns one step on every redraw.
-                if (this._capture.Phase == CapturePhase.Processing)
-                {
-                    this._redraw();
-                    return;
-                }
-
                 String shown;
                 lock (this._lock)
                 {
                     shown = this._shownGroup;
                 }
 
-                var page = this.CurrentPage("h");
-                if (shown is not (null or "h") || page is not ("codex" or "claude" or "waiting" or "ready"))
+                var ids = shown switch
                 {
-                    return;
-                }
-
-                var app = page == "codex" ? "codex" : page == "claude" ? "claude" : null;
-                if (!this._sessions.All().Any(s => s.State == "working" && (app == null || s.App == app)))
+                    "h" => Enumerable.Range(0, 9).Select(i => $"h{i}"),
+                    "m" => Enumerable.Range(0, 9).Select(i => $"m{i}"),
+                    "x" => new[] { "x0" },
+                    "none" => Enumerable.Empty<String>(),
+                    _ => Enumerable.Range(0, 9).SelectMany(i => new[] { $"h{i}", $"m{i}" }),
+                };
+                var now = Motion.Now;
+                foreach (var id in ids)
                 {
-                    return;
-                }
+                    var face = this.FaceFor(id);
+                    Boolean moving;
+                    lock (this._lock)
+                    {
+                        moving = face.Animated(now) || this.AnimFor(id, face).Playing;
+                    }
 
-                KeyRenderer.Pulse = (KeyRenderer.Pulse + 0.125) % 1.0;
-                this._redraw();
+                    if (moving)
+                    {
+                        this._redrawKey(id);
+                    }
+                }
             }
             catch (Exception ex)
             {
-                PluginLog.Warning(ex, "pulse failed");
+                PluginLog.Warning(ex, "animation tick failed");
+            }
+        }
+
+        // Changes what one group shows. The new screen appears at once: a flip between screens looked slow at
+        // the keypad's frame rate. Badges on a new screen do not roll, since their numbers did not change.
+        private void ChangeScreen(String group, Action change)
+        {
+            change();
+            lock (this._lock)
+            {
+                for (var i = 0; i < 9; i++)
+                {
+                    this._lastBadge.Remove($"{group}{i}");
+                }
             }
         }
 
@@ -786,6 +887,7 @@ namespace Loupedeck.AgentKeypadPlugin
         // Usage is read in the background every 10 minutes, and again on opening if the last read is over 2 minutes old.
         private void OpenUsage()
         {
+            this._usageShownAt = Motion.Now;
             this.Go("m", "usage");
             if (DateTime.UtcNow - this._usageReadAt > TimeSpan.FromMinutes(2))
             {
@@ -876,6 +978,7 @@ namespace Loupedeck.AgentKeypadPlugin
             lock (this._lock)
             {
                 this._flash[id] = label;
+                this.Anim(id).FlashAt = Motion.Now;
                 token = this._labelTokens[id] = ++this._labelToken;
             }
 

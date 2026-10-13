@@ -22,7 +22,24 @@ namespace Loupedeck.AgentKeypadPlugin
         private readonly Object _lock = new();
         private Process _selector;
 
-        public CapturePhase Phase { get; private set; } = CapturePhase.Idle;
+        // Setting the phase also records when it began, on the animation clock.
+        public CapturePhase Phase
+        {
+            get => this._phase;
+            private set
+            {
+                if (value != this._phase)
+                {
+                    this.PhaseSince = Motion.Now;
+                }
+
+                this._phase = value;
+            }
+        }
+
+        private CapturePhase _phase = CapturePhase.Idle;
+
+        public Double PhaseSince { get; private set; }
         public String Kind { get; private set; }            // "voice" or "area"
         public String Target { get; private set; }          // bundle id fixed at capture start
         public String Note { get; private set; }            // short reason for NotSent
@@ -49,7 +66,6 @@ namespace Loupedeck.AgentKeypadPlugin
         public Boolean Busy => this.Phase is CapturePhase.Selecting or CapturePhase.Recording or CapturePhase.Processing;
 
         private const Int32 SettleMs = 450;   // after an app comes to the front, before pasting into it
-        private Int32 _ticks;
         private Int32 _generation;   // one number per capture; work from an older capture may not change the key
         private Int32 _sending;      // 1 while Keep in wiki is pasting
         private volatile Boolean _disposed;
@@ -72,11 +88,6 @@ namespace Loupedeck.AgentKeypadPlugin
                     this._redraw();
                 }
 
-                // Recording and processing show a running count of seconds, so redraw once a second.
-                if (this.Phase is CapturePhase.Recording or CapturePhase.Processing && ++this._ticks % 2 == 0)
-                {
-                    this._redraw();
-                }
             }
             catch (Exception ex)
             {
@@ -244,6 +255,7 @@ namespace Loupedeck.AgentKeypadPlugin
         public void Stop()
         {
             Int32 gen;
+            TimeSpan recorded;
             lock (this._lock)
             {
                 if (this.Phase != CapturePhase.Recording)
@@ -252,6 +264,7 @@ namespace Loupedeck.AgentKeypadPlugin
                 }
 
                 gen = this._generation;
+                recorded = DateTime.UtcNow - this.StartedAt;
                 this.Phase = CapturePhase.Processing;
                 this.Step = "Transcribing";
                 this.ProcessingSince = DateTime.UtcNow;
@@ -292,14 +305,22 @@ namespace Loupedeck.AgentKeypadPlugin
 
                 // Doing copies the transcript to the clipboard and pastes it. Wait for that copy.
                 var watch = Stopwatch.StartNew();
-                while (MacNative.ClipboardChangeCount() == before && watch.Elapsed < TimeSpan.FromSeconds(25) && this.Current(gen))
+                // A short recording gives a short wait: 6 s plus half the recording time, at most 25 s.
+                // A one-second recording with no words no longer sits on Transcribing for 25 s.
+                var wait = TimeSpan.FromSeconds(Math.Clamp(6 + recorded.TotalSeconds * 0.5, 6, 25));
+                while (MacNative.ClipboardChangeCount() == before && watch.Elapsed < wait && this.Current(gen))
                 {
                     Thread.Sleep(100);
                 }
 
                 if (MacNative.ClipboardChangeCount() == before)
                 {
-                    PluginLog.Warning("capture: Doing produced no transcript within 25 s");
+                    if (!this.Current(gen))
+                    {
+                        return;   // the wait was stopped from the keypad
+                    }
+
+                    PluginLog.Warning($"capture: Doing produced no transcript within {wait.TotalSeconds:0} s (recorded {recorded.TotalSeconds:0.0} s)");
                     this.Finish(gen, CapturePhase.NotSent, "no words");
                     return;
                 }
@@ -420,10 +441,11 @@ namespace Loupedeck.AgentKeypadPlugin
         }
 
         // Cancel: while choosing an area, stops the selection; while recording, stops exactly as Dictate does,
-        // because Doing pastes its text either way.
+        // because Doing pastes its text either way; while waiting for the transcript, stops waiting.
         public Boolean Cancel()
         {
             Process selector;
+            var stoppedWait = false;
             lock (this._lock)
             {
                 switch (this.Phase)
@@ -435,9 +457,23 @@ namespace Loupedeck.AgentKeypadPlugin
                     case CapturePhase.Recording:
                         selector = null;
                         break;
+                    case CapturePhase.Processing:
+                        // Stop waiting for Doing. Anything it pastes later lands in the box unsent, as always.
+                        this._generation++;
+                        this.Phase = CapturePhase.Idle;
+                        stoppedWait = true;
+                        selector = null;
+                        break;
                     default:
                         return false;
                 }
+            }
+
+            if (stoppedWait)
+            {
+                PluginLog.Info("capture: stopped waiting for the transcript from the keypad");
+                this._redraw();
+                return true;
             }
 
             if (selector == null)
@@ -500,13 +536,14 @@ namespace Loupedeck.AgentKeypadPlugin
 
             PluginLog.Info($"capture: finished {phase}{(note != null ? ", " + note : "")}{(detail != null ? " (" + detail + ")" : "")}");
             this._redraw();
-            if (phase == CapturePhase.InBox)
+            // In box clears after 3 s and Not sent after 5 s, so the key always returns to Dictate by itself.
+            if (phase is CapturePhase.InBox or CapturePhase.NotSent)
             {
-                Task.Delay(3000).ContinueWith(_ =>
+                Task.Delay(phase == CapturePhase.InBox ? 3000 : 5000).ContinueWith(_ =>
                 {
                     lock (this._lock)
                     {
-                        if (!this.Current(gen) || this.Phase != CapturePhase.InBox)
+                        if (!this.Current(gen) || this.Phase != phase)
                         {
                             return;
                         }

@@ -36,6 +36,21 @@ namespace Loupedeck.AgentKeypadPlugin
         // Shown in the subtitle when an unavailable key is pressed.
         public String Why;
 
+        // Animated states: "recording", "processing", "selecting", "inbox", "notsent".
+        // LiveSince is when the state began (Motion clock); LiveLength is how long it lasts, for a countdown line.
+        public String Live;
+        public Double LiveSince;
+        public Double LiveLength;
+
+        public String SessionId;     // session keys: which session, so a finish can play once on whichever key shows it
+        public Double ShownAt;       // usage keys: when the Usage screen opened, for the bar fill
+
+        // True when the face keeps changing on its own and needs the animation timer.
+        public Boolean Animated(Double now) =>
+            this.Live != null
+            || (this.Kind == KeyKind.Session && this.Status is "Working" or "Permission" or "Approval" or "Question")
+            || (this.Kind == KeyKind.Stat && now - this.ShownAt < Motion.FillMs + 600);
+
         public static KeyFace Empty() => new() { Tone = KeyTone.Empty };
     }
 

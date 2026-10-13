@@ -19,7 +19,7 @@ namespace Loupedeck.AgentKeypadPlugin
 
         protected override Boolean OnLoad()
         {
-            ((AgentKeypadPlugin)this.Plugin).AttachRedraw(() => this.ActionImageChanged());
+            ((AgentKeypadPlugin)this.Plugin).AttachRedraw(() => this.ActionImageChanged(), id => this.ActionImageChanged(id));
             return true;
         }
 

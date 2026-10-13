@@ -7,6 +7,7 @@ namespace Loupedeck.AgentKeypadPlugin
     public class AgentKeypadPlugin : Plugin
     {
         private Action _redraw = () => { };
+        private Action<String> _redrawKey = _ => { };
 
         public override Boolean UsesApplicationApiOnly => true;
 
@@ -18,10 +19,14 @@ namespace Loupedeck.AgentKeypadPlugin
         {
             PluginLog.Init(this.Log);
             PluginResources.Init(this.Assembly);
-            this.Controller = new KeypadController(this, () => this._redraw());
+            this.Controller = new KeypadController(this, () => this._redraw(), id => this._redrawKey(id));
         }
 
-        internal void AttachRedraw(Action redraw) => this._redraw = redraw;
+        internal void AttachRedraw(Action redraw, Action<String> redrawKey)
+        {
+            this._redraw = redraw;
+            this._redrawKey = redrawKey;
+        }
 
         public override void Load()
         {
