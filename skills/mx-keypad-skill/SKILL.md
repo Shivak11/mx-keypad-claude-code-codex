@@ -35,6 +35,8 @@ These are the problems that took hours to find. Check each one before debugging 
 | The user said a dictation "gets stuck on Not sent" although the text arrived | They stopped with Cancel, which skipped Return by design, and the key stayed on Not sent until pressed | Never press Return after dictation; end every capture on a short-lived, plainly named state such as "In box" |
 | Codex sessions only ever show Working | Codex runs a hook only after it is approved, the approval is tied to the hook's position in `hooks.json`, and only `PostToolUse` was approved | Ask the user to approve every keypad hook in Codex's hook review; never move entries in `hooks.json` without telling them to approve again |
 | A session stays on Working or Waiting after Esc or a refused dialog | An interrupted turn ends without `Stop` | Treat a tool event with `is_interrupt` as idle |
+| Dictation "gets stuck on loading", then on Not sent | A one-second recording with no words waited the full 25 s for a transcript, no key could end the wait, and Not sent stayed until pressed | Scale the wait with the recording length (6 s plus half the recording, at most 25 s), let the capture key and Cancel end it, and clear Not sent after a few seconds |
+| Press and screen-change animations look slow on the device | Options+ shows key images at only a few frames a second, so a dip, a shake or a flip between screens takes visibly long | Give press feedback as an instant brighten and change screens at once; keep animations that run in place, such as an edge light, turning ticks, a breathing outline and countdown lines |
 
 ## Architecture that works
 
