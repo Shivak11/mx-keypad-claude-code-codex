@@ -40,6 +40,8 @@ The sample installer is `sample-plugin/hooks/install_hooks.py` (`--remove` takes
 ```text
 claude://code/continue?session=local_<sessionId>&source=desktop_action
 codex://threads/<thread id>
+claude://code/new?q=<text>&folder=<path>&source=desktop_action   (new session, request typed in, not sent)
+codex://threads/new?prompt=<text>                           (new thread with the request; read from Codex's own code, not yet tested)
 ```
 
 Open with `/usr/bin/open <url>`. Opening a "ready" session should mark it read.

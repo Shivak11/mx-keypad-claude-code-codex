@@ -72,6 +72,26 @@ def main():
         lock.close()
 
 
+def codex_reviewer_approves():
+    """True when Codex sends approval requests to its own reviewer instead of to the user.
+
+    With approvals_reviewer set to anything other than "user" in ~/.codex/config.toml, a
+    PermissionRequest means Codex's reviewer is checking a command, and Codex carries on by itself.
+    """
+    try:
+        with open(os.path.join(os.path.expanduser("~"), ".codex", "config.toml")) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("["):
+                    break   # only top-level keys
+                if line.startswith("approvals_reviewer"):
+                    value = line.split("=", 1)[1].split("#", 1)[0].strip().strip('"\'')
+                    return value not in ("", "user")
+    except (OSError, IndexError):
+        pass
+    return False
+
+
 def matches(entry, tool_use_id, tool):
     if tool_use_id and entry.get("id"):
         return entry["id"] == tool_use_id
@@ -114,6 +134,9 @@ def update(app, sid, path, event, data):
     if event == "UserPromptSubmit":
         rec.update(state="working", ready=False)
         set_waits([])
+    elif event == "PermissionRequest" and app == "codex" and codex_reviewer_approves():
+        # Codex's reviewer decides; the session is working, not waiting for the user.
+        rec.update(state="working", ready=False)
     elif event == "PermissionRequest" or (event == "PreToolUse" and tool == "AskUserQuestion"):
         label = "Question" if tool == "AskUserQuestion" else "Approval" if app == "codex" else "Permission"
         if not pending:
