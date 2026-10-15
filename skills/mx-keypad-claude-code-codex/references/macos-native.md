@@ -20,6 +20,12 @@ Never chain keystrokes on a guess. A Clipboard key that pressed Command+Space an
 
 For a fixed instruction (not dictation): save the clipboard, copy the text with `pbcopy` and check the change count rose, activate the target app and wait until it is in front plus about 450 ms for the message box to take focus, paste with Command+V, check again, press Return, then restore the clipboard. If any check fails, show "Not sent". Add a watchdog so a key always ends.
 
+## Putting focus back in a text box
+
+Read the focused element of an app with `AXUIElementCopyAttributeValue(app, "AXFocusedUIElement")` after setting `AXManualAccessibility` to true on the app (Electron apps build their accessibility tree only when asked). Its `AXRole` tells whether it is a text box (`AXTextArea`, `AXTextField`, `AXComboBox`, `AXSearchField`) and its `AXValue` holds the text. Keep the element when it is a text box, together with its `AXSelectedTextRange`.
+
+Later, bring the box back with `AXUIElementSetAttributeValue(element, "AXFocused", true)`, then set `AXSelectedTextRange` to the remembered range, built with `AXValueCreate(4, &range)` (type 4 is a `CFRange`). A plain `CFRelease` on the elements you keep is needed once you are done. In Claude's desktop app the message box is the `AXTextArea` whose `AXDescription` is "Prompt"; searching the focused window for it works when focus has moved to a link or checkbox.
+
 ## Saving and restoring the clipboard
 
 To paste your own text without losing what the user copied, save every item on the pasteboard with every type (`pasteboardItems`, then `types` and `dataForType:` for each), paste, wait about 400 ms for the app to read it, and write the items back as new `NSPasteboardItem`s with `writeObjects:`. Skip the restore if `changeCount` moved since your copy, because the user copied something newer. macOS can add derived types when content is written (rich text gained a UTF-16 plain-text type), so compare a restore against what you saved, not against what you first wrote.

@@ -1,14 +1,18 @@
-# MX Keypad skill
+# MX Keypad for Claude Code and Codex
 
-An agent skill for building a Logitech MX Keypad (MX Creative Console) plugin on macOS with the Logi Actions SDK, wired to AI coding agents such as Claude Code and Codex. It records what worked on a real keypad and the failures that cost the most time, and it includes a complete sample plugin.
+An agent skill and sample plugin for the Logitech MX Keypad (MX Creative Console) on macOS. The plugin turns the keypad's nine LCD keys into controls for Claude Code and Codex: which sessions are working, waiting or finished, one-press dictation, area screenshots, Send and Discard, and switching between active threads. It is built with the Logi Actions SDK. It records what worked on a real keypad and the failures that cost the most time, and it includes a complete sample plugin.
+
+![The Home screen of the full plugin](docs/images/keypad-home.png)
+
+The Home screen as the full plugin draws it. The sample plugin below has a smaller Home page.
 
 ## Install
 
 ```bash
-npx skills add Shivak11/mx-keypad-skill
+npx skills add Shivak11/mx-keypad-claude-code-codex
 ```
 
-The skill is in [`skills/mx-keypad-skill`](skills/mx-keypad-skill/SKILL.md). Your agent loads it when you ask about the MX Keypad, Logi Options+ plugins, Logi Plugin Service or physical buttons for coding agents.
+The skill is in [`skills/mx-keypad-claude-code-codex`](skills/mx-keypad-claude-code-codex/SKILL.md). Your agent loads it when you ask about the MX Keypad, Logi Options+ plugins, Logi Plugin Service or physical buttons for coding agents.
 
 ## What the skill covers
 
@@ -18,6 +22,8 @@ The skill is in [`skills/mx-keypad-skill`](skills/mx-keypad-skill/SKILL.md). You
 - Showing which Claude Code and Codex sessions are working, waiting or finished, using lifecycle hooks that never store prompt text
 - Opening the exact session, and opening the page from each app's built-in browser panel in another browser
 - Putting dictation and screenshots into the last AI window's message box, with a check that the window is in front; the user presses Enter
+- Sending each result to the text box that had the cursor when the key was pressed, by remembering that box and restoring focus to it through the accessibility API
+- Switching between the threads in use, most recent first, like switching tabs
 - Reading Claude and Codex five-hour and weekly usage limits without getting rate limited
 - Proving changes without touching the device: rendering keys to PNG and running probes inside the plugin
 

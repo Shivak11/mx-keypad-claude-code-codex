@@ -48,6 +48,12 @@ Open with `/usr/bin/open <url>`. Opening a "ready" session should mark it read.
 
 The user also reads results in the app itself, so clear Ready there too. Claude's record has `lastFocusedAt`, which changes only when the user switches to a session, not while they keep looking at it. Treat a session as read when `lastFocusedAt` is later than the finish time, or when Claude is in front and the session has the latest `lastFocusedAt` of all (it is on screen as it finishes). Save the read mark, or Ready returns when the user looks away.
 
+## Cycling between active threads
+
+A key that works like switching tabs needs a list of threads in use, newest first. Claude's session files record when the user last focused each session (`lastFocusedAt`) and when it last had activity (`lastActivityAt`), both in milliseconds; Codex records only activity. Use focus time for Claude and activity time for Codex.
+
+Keep a session when it is working or waiting (and its record changed in the last 2 hours), or when it was looked at in the last 30 minutes. Do not keep a session only because the key itself passed through it on the way to another one. Cycle through a list frozen for about 8 seconds so that pressing again continues along the same list, and start at the session now on screen.
+
 ## Approving from the keypad
 
 Not built in the sample. Claude's `PermissionRequest` hook can return allow or deny, but it runs before the dialog appears, so a keypad answer would have to press keys in the visible dialog. Observe each app's dialog first, open the session, and only then show that app's own options. Never approve on a guess.
