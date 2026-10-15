@@ -69,15 +69,16 @@ For an agent that is not in the table, write what you found back to the user in 
 
 ## 4. Where each assumption lives in the sample plugin
 
-The paths are inside `sample-plugin/plugin/AgentKeypadPlugin/src/`, except the hook files, which are in `sample-plugin/hooks/`. Change these places and no others. Where an assumption appears in several places, turn it into one named setting in the user's copy first, so the next change touches one place.
+The paths are inside `sample-plugin/plugin/AgentKeypadPlugin/src/`, except the hook files, which are in `sample-plugin/hooks/`. The dictation trigger, the screenshot shortcut and the browser are settings in `sample-plugin/settings.example.json`, so write the user's answers there and change no code for them. Everything else needs a code change. Change these places and no others. Where an assumption appears in several places, turn it into one named setting in the user's copy first, so the next change touches one place.
 
 | Assumption | Where it is |
 |---|---|
 | Agent app bundle ids | `Keypad/CaptureController.cs` (`ClaudeBundle`, `CodexBundle`), `Keypad/SessionStore.cs` |
 | Session links and the agents' session sources | `Keypad/SessionStore.cs` |
 | Hooks written into each agent | `hooks/keypad_hook.py` and `hooks/install_hooks.py` |
-| Dictation trigger and cancel | `Keypad/CaptureController.cs` and `Keypad/MacNative.cs` (the fn sequence) |
-| Screenshot shortcut and browser | `Keypad/KeypadController.cs` |
+| Dictation trigger | `~/.mx-keypad/settings.json` (`dictationTrigger`, `dictationShortcut`). A new kind of trigger is added in `PressDictationTrigger` in `Keypad/CaptureController.cs` |
+| Dictation cancel | `Keypad/CaptureController.cs` and `Keypad/MacNative.cs`, because it depends on the dictation app |
+| Screenshot shortcut and tool name, browser name and bundle id | `~/.mx-keypad/settings.json`, read by `Keypad/KeypadSettings.cs` |
 | Usage limits | `Keypad/UsageStore.cs` |
 
 ## 5. Before and after building

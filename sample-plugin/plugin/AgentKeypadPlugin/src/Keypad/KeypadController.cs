@@ -282,7 +282,7 @@ namespace Loupedeck.AgentKeypadPlugin
                     : this._capture.Phase is CapturePhase.Selecting or CapturePhase.Processing
                     ? new KeyFace { Icon = "x", IconColor = Colors.Slate, Label = "Cancel", Act = () => this._capture.Cancel() }
                     : new KeyFace { Icon = "x", IconColor = Colors.Slate, Label = "Cancel", Tone = KeyTone.Off, Why = "nothing to stop" },
-                new KeyFace { Icon = "dia", IconColor = Colors.Violet, Label = "Open in Dia", Act = () => this.OpenInDia("h6") },
+                new KeyFace { Icon = "dia", IconColor = Colors.Violet, Label = "Open in " + KeypadSettings.Current.BrowserName, Act = () => this.OpenInDia("h6") },
                 this.SwitchAgentFace(),
                 new KeyFace { Icon = "result", IconColor = Colors.Green, Label = "Ready", Badge = ready.Count, BadgeColor = Colors.Green, Act = () => this.Go("h", "ready") },
             };
@@ -357,7 +357,7 @@ namespace Loupedeck.AgentKeypadPlugin
                     }
 
                     this._lastAiBeforeDia = app;
-                    MacNative.Run("/usr/bin/open", "-b", "company.thebrowser.dia", url);
+                    MacNative.Run("/usr/bin/open", "-b", KeypadSettings.Current.BrowserBundleId, url);
                     this.Flash(keyId, "Opened");
                 }
                 catch (Exception ex)
@@ -427,7 +427,7 @@ namespace Loupedeck.AgentKeypadPlugin
             new KeyFace { Icon = "bookmark", IconColor = Colors.Teal, Label = "Save note", Act = this.SaveNote },
             new KeyFace { Icon = "gauge", IconColor = Colors.Violet, Label = "Usage", Act = this.OpenUsage },
             new KeyFace { Icon = "clip", IconColor = Colors.Cyan, Label = "Clipboard", Tone = KeyTone.Off, Why = "being fixed" },
-            new KeyFace { Icon = "camera", IconColor = Colors.Blue, Label = "Screenshot", Act = () => this.Run("m3", "Xnapper", this.Screenshot) },
+            new KeyFace { Icon = "camera", IconColor = Colors.Blue, Label = "Screenshot", Act = () => this.Run("m3", KeypadSettings.Current.ScreenshotTool, this.Screenshot) },
             new KeyFace { Icon = "smile", IconColor = Colors.Yellow, Label = "Emojis", Act = () => this.Run("m4", "Opened", this.Emojis) },
             new KeyFace { Icon = "folder", IconColor = Colors.Blue, Label = "Downloads", Act = () => this.Run("m5", "Opened", () => OpenFolder("Downloads")) },
             new KeyFace { Icon = "folder", IconColor = Colors.Orange, Label = "Projects", Act = () => this.Run("m6", "Opened", () => OpenFolder("Projects")) },
@@ -1019,9 +1019,17 @@ namespace Loupedeck.AgentKeypadPlugin
             Process.Start(psi)?.Dispose();
         }
 
-        // Control+Command+Option+4 is the capture shortcut used by Xnapper; change it for your screenshot app.
-        private void Screenshot() =>
-            this._plugin.ClientApplication.SendKeyboardShortcut(VirtualKeyCode.Key4, ModifierKey.Control | ModifierKey.Command | ModifierKey.Option);
+        // The area-screenshot shortcut of the user's screenshot tool, from settings.json.
+        private void Screenshot()
+        {
+            if (!KeypadSettings.TryParseShortcut(KeypadSettings.Current.ScreenshotShortcut, out var key, out var modifiers))
+            {
+                PluginLog.Warning($"settings: cannot read the screenshot shortcut '{KeypadSettings.Current.ScreenshotShortcut}'");
+                return;
+            }
+
+            this._plugin.ClientApplication.SendKeyboardShortcut(key, modifiers);
+        }
 
         private void Emojis() =>
             this._plugin.ClientApplication.SendKeyboardShortcut(VirtualKeyCode.Space, ModifierKey.Control | ModifierKey.Command);

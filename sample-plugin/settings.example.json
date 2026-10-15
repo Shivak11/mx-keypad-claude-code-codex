@@ -1,0 +1,8 @@
+{
+  "dictationTrigger": "fn-hands-free",
+  "dictationShortcut": "",
+  "screenshotShortcut": "control+command+option+4",
+  "screenshotTool": "Xnapper",
+  "browserName": "Dia",
+  "browserBundleId": "company.thebrowser.dia"
+}

@@ -57,6 +57,8 @@ dotnet build -c Debug                 # needs the .NET 10 SDK; installs a link t
 python3 ../../../hooks/install_hooks.py   # adds session hooks to Claude Code and Codex (backs up both files)
 ```
 
+To use your own dictation app, screenshot tool and browser without editing code, copy [`sample-plugin/settings.example.json`](sample-plugin/settings.example.json) to `~/.mx-keypad/settings.json` and change it. `dictationTrigger` is `fn-hands-free` (the default), `fn-tap` or `shortcut`, and `shortcut` uses `dictationShortcut`, for example `control+option+space`. Shortcuts are written as modifiers joined by `+`, then a letter, a digit or `space`. The plugin reads the file when it starts, so reload it after a change. If the file is missing or cannot be read, the sample behaves as before: Doing's fn trigger, the Xnapper shortcut and Dia.
+
 Then, in Logi Options+, turn off Adapt to App for the MX Keypad, drag Home key 1 to 9 onto the first page and Moves key 1 to 9 onto the second, and give Logi Plugin Service Accessibility and Screen Recording permission.
 
 The plugin reads your Claude Code login from the macOS Keychain to fetch Claude usage limits from Anthropic. The login is used only for that request and is never stored or logged.

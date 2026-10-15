@@ -134,6 +134,40 @@ namespace Loupedeck.AgentKeypadPlugin
             return null;
         }
 
+        // Starts or stops the user's dictation app with the trigger named in settings.json.
+        private void PressDictationTrigger(Boolean start)
+        {
+            var settings = KeypadSettings.Current;
+            switch (settings.DictationTrigger)
+            {
+                case "fn-tap":
+                    MacNative.FnTap();
+                    break;
+                case "shortcut":
+                    if (KeypadSettings.TryParseShortcut(settings.DictationShortcut, out var key, out var modifiers))
+                    {
+                        this._plugin.ClientApplication.SendKeyboardShortcut(key, modifiers);
+                    }
+                    else
+                    {
+                        throw new InvalidOperationException($"cannot read the dictation shortcut '{settings.DictationShortcut}'");
+                    }
+
+                    break;
+                default:
+                    if (start)
+                    {
+                        MacNative.FnHandsFree();
+                    }
+                    else
+                    {
+                        MacNative.FnTap();
+                    }
+
+                    break;
+            }
+        }
+
         private Boolean Current(Int32 gen) => !this._disposed && this._generation == gen;
 
         private void BeginRecording(Int32 gen)
@@ -145,7 +179,7 @@ namespace Loupedeck.AgentKeypadPlugin
 
             try
             {
-                MacNative.FnHandsFree();
+                this.PressDictationTrigger(start: true);
             }
             catch (Exception ex)
             {
@@ -300,8 +334,8 @@ namespace Loupedeck.AgentKeypadPlugin
                     return;
                 }
 
-                MacNative.FnTap();
-                PluginLog.Info("capture: fn sent to stop Doing");
+                this.PressDictationTrigger(start: false);
+                PluginLog.Info("capture: dictation trigger sent to stop the dictation app");
 
                 // Doing copies the transcript to the clipboard and pastes it. Wait for that copy.
                 var watch = Stopwatch.StartNew();
