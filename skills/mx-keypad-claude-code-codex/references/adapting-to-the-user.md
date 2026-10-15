@@ -22,7 +22,7 @@ Ask the questions below in rounds of at most five. Each question carries a recom
 | Dictation | How do you start dictation today: hold a key, tap a key to start and again to stop, or click a button? | Tap to start and again to stop |
 | Dictation | Which key or shortcut starts it? | The one in the dictation app's settings, which you read from the user and not from files |
 | Dictation | Should Discard throw a recording away before it is transcribed? | Yes where the app can cancel, and otherwise stop it and remove the text |
-| Screenshots | Which tool takes your area screenshots? | The macOS screenshot tool, unless another was found |
+| Screenshots | Which screenshot tool should the Screenshot key start? | The macOS screenshot tool, unless another was found |
 | Browser | Which browser should open the page shown inside an agent's panel? | The default browser |
 | Clipboard | Do you use a clipboard manager, or macOS's own clipboard history? | macOS's own |
 | Keys | Which three actions do you repeat most each day? | Switch to a session, dictate and send |
@@ -37,7 +37,8 @@ Each module is a group of keys with one dependency on the user's setup. Build th
 | Session state | Waiting, Ready, one list per agent | A way to learn each session's state: lifecycle hooks, or the agent's own session files | Show only whether the agent is running, or leave the module out |
 | Open a session | A session key | A link or command that opens an exact session | Bring the agent's window to the front |
 | Dictate and Discard | Dictate, Discard | The dictation app's trigger, and whether it can cancel | Use macOS Dictation, or leave the module out |
-| Select Area and Send | Select Area, Send | A screenshot shortcut, and a message box whose text can be read through accessibility | In a terminal agent, send Return without reading the text |
+| Select Area and Send | Select Area, Send | A message box whose text can be read through accessibility. Select Area uses macOS's own area screenshot (`screencapture -i -c`), pastes it, and then starts the user's dictation app, so it does not depend on their screenshot tool | In a terminal agent, send Return without reading the text |
+| Screenshot | Screenshot key on the Moves page | The shortcut of the user's screenshot tool | Leave the key out |
 | Next thread | Next thread | A list of the sessions in use with the time each was last focused | Use the app's own next-tab shortcut |
 | Usage | Usage screen | An agent that reports its limits | Leave the module out |
 | Open in browser | Open in browser | An agent with a built-in browser panel, and the user's browser | Leave the module out |
