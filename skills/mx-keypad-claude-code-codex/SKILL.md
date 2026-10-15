@@ -1,11 +1,22 @@
 ---
 name: mx-keypad-claude-code-codex
-description: Build a Logitech MX Keypad plugin for Claude Code and Codex on macOS with the Logi Actions SDK in C#, with live session keys that show which Claude Code and Codex sessions are working, waiting or finished, one-press voice dictation, area screenshots, Send and Discard keys, next-thread switching and usage limits on the keypad's nine LCD keys. Covers project setup on the .NET version the Logi Plugin Service really runs, drawing every key yourself, press feedback, page navigation, opening an exact session, putting dictation and screenshots into the right text box, reading Claude and Codex usage limits, and the failures that cost the most time. Use this skill whenever someone mentions the MX Keypad, MX Creative Console, Loupedeck, Logi Options+ plugins, Logi Plugin Service, LogiPluginTool, .lplug4 files, or wants physical buttons or a macro pad for Claude Code, Codex or other coding agents, even if they do not name the SDK.
+description: Build a Logitech MX Keypad plugin for Claude Code and Codex on macOS with the Logi Actions SDK in C#, with live session keys that show which Claude Code and Codex sessions are working, waiting or finished, one-press voice dictation, area screenshots, Send and Discard keys, next-thread switching and usage limits on the keypad's nine LCD keys. Learns which coding agents, dictation app, screenshot tool and browser the user has, asks what they want, and adapts the keys to them. Covers project setup on the .NET version the Logi Plugin Service really runs, drawing every key yourself, press feedback, page navigation, opening an exact session, putting dictation and screenshots into the right text box, reading Claude and Codex usage limits, and the failures that cost the most time. Use this skill whenever someone mentions the MX Keypad, MX Creative Console, Loupedeck, Logi Options+ plugins, Logi Plugin Service, LogiPluginTool, .lplug4 files, or wants physical buttons or a macro pad for Claude Code, Codex or other coding agents, even if they do not name the SDK.
 ---
 
 # MX Keypad plugins for AI coding agents
 
 Few people have built Logitech Actions SDK plugins, and the official documentation is thin and partly out of date. This skill records what actually worked on a real MX Keypad connected to Claude Code and Codex desktop on macOS in October 2026, including the mistakes. A complete working plugin is in `sample-plugin/` of the repository this skill ships in.
+
+## Start by learning the user's setup
+
+The sample plugin assumes Claude Code, Codex, the Doing dictation app, the Dia browser and the Xnapper screenshot shortcut. Do not build for those unless the user has them. Before writing code:
+
+1. Run `python3 -I scripts/detect_setup.py`. It lists installed coding agents, dictation apps, screenshot tools, browsers and terminals by name, and opens no settings file or credential.
+2. Read `references/adapting-to-the-user.md`. Ask its questions in short rounds, each with a recommended answer from what was detected.
+3. Show the user which modules you will build and which you will leave out, with the reason, and wait for their reply.
+4. Change only the places the reference lists, and ask the user to press each key once when you finish.
+
+For a coding agent that the reference marks as not tested, such as OpenCode, pi or Gemini CLI, read that agent's current documentation first and answer the reference's six adapter questions before building.
 
 ## How to work with this skill
 
@@ -97,6 +108,7 @@ The owner of the first plugin cared about these, and they hold up on an 80 to 11
 
 | File | Read when |
 |---|---|
+| `references/adapting-to-the-user.md` | Learning what the user has, choosing modules, adapting the plugin to other agents, dictation apps and tools |
 | `references/setup-and-build.md` | Creating the project, building, installing, inspecting the SDK |
 | `references/drawing-keys.md` | Drawing keys, icons, fonts, press feedback, the icon template |
 | `references/navigation.md` | Pages, lists, More, Back, Home, switching Options+ pages |

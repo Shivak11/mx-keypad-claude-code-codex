@@ -6,6 +6,20 @@ An agent skill and sample plugin for the Logitech MX Keypad (MX Creative Console
 
 The Home screen as the full plugin draws it. The sample plugin below has a smaller Home page.
 
+## Why install the skill
+
+Writing a plugin for the MX Keypad takes days of trial and error, because Logitech's documentation is thin and partly wrong for the current software. The skill gives your coding agent what that took to learn, and it fits the keypad to the tools you already use, so you do not have to copy someone else's setup.
+
+When you ask your agent to build a keypad plugin, the skill makes it:
+
+- **Look at your Mac.** It lists the coding agents, dictation app, screenshot tool, browser and terminal you have installed. It opens no settings file and no credential.
+- **Ask a few short questions.** Each comes with a recommended answer, for example how you start dictation and which three actions you repeat most. Answering "yes" accepts the recommendations.
+- **Show the plan first.** It tells you which keys it will build and which it will leave out, with the reason, and waits for your reply.
+- **Build from a working plugin.** It changes only the parts that depend on your tools: the agent apps, the dictation app and its trigger, the screenshot shortcut, the browser and the usage limits.
+- **Avoid the failures that cost the most time.** More than twenty are recorded, such as keys that go blank after an icon template is added, a Return that lands in the wrong session, and a dictation that never reaches the message box.
+
+Claude Code and Codex are tested on a real keypad. For other agents, such as OpenCode, pi or Gemini CLI, the skill asks the same six questions about each one and builds from the answers. Those agents are not tested yet.
+
 ## Install
 
 ```bash
@@ -16,6 +30,7 @@ The skill is in [`skills/mx-keypad-claude-code-codex`](skills/mx-keypad-claude-c
 
 ## What the skill covers
 
+- Learning which coding agents, dictation app, screenshot tool and browser you use, asking what you want, and building only the keys that fit
 - Setting up a plugin on the .NET version the Logi Plugin Service actually runs (.NET 10 on service 6.4, not the .NET 8 the docs name)
 - Drawing every key yourself: the icon template that removes Options+ captions, colour SVG icons, one label size, press feedback
 - Screens, lists, More, Back and Home, and switching Options+ pages
