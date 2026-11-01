@@ -21,6 +21,7 @@ namespace Loupedeck.AgentKeypadPlugin
         private readonly Timer _poll;
         private readonly Object _lock = new();
         private Process _selector;
+        private FocusedField _destination;
 
         // Setting the phase also records when it began, on the animation clock.
         public CapturePhase Phase
@@ -61,7 +62,7 @@ namespace Loupedeck.AgentKeypadPlugin
             this._poll = new Timer(_ => this.Poll(), null, 0, 500);
         }
 
-        public static String AppName(String bundle) => bundle == ClaudeBundle ? "Claude" : bundle == CodexBundle ? "Codex" : null;
+        public static String AppName(String bundle) => bundle == ClaudeBundle ? "Claude" : bundle == CodexBundle ? "Codex" : "App";
 
         public Boolean Busy => this.Phase is CapturePhase.Selecting or CapturePhase.Recording or CapturePhase.Processing;
 
@@ -106,14 +107,21 @@ namespace Loupedeck.AgentKeypadPlugin
                     return "busy";
                 }
 
-                if (this.LastAi == null)
+                var target = MacNative.FrontmostBundleId();
+                if (String.IsNullOrEmpty(target) || target == "com.electron.wispr-flow" || target == "com.logi.optionsplus")
                 {
-                    return "no AI app yet";
+                    return "focus a text box";
                 }
-
+                var destination = FocusedField.Capture(target);
+                if (destination == null)
+                {
+                    return "focus a text box";
+                }
+                this._destination?.Dispose();
+                this._destination = destination;
                 gen = ++this._generation;
                 this.Kind = kind;
-                this.Target = this.LastAi;
+                this.Target = target;
                 this.Note = null;
                 this.Phase = kind == "area" ? CapturePhase.Selecting : CapturePhase.Recording;
                 this.StartedAt = DateTime.UtcNow;
@@ -140,6 +148,9 @@ namespace Loupedeck.AgentKeypadPlugin
             var settings = KeypadSettings.Current;
             switch (settings.DictationTrigger)
             {
+                case "wispr":
+                    using (var process = Process.Start(new ProcessStartInfo("/usr/bin/open") { UseShellExecute = false, ArgumentList = { "-g", start ? "wispr-flow://start-hands-free" : "wispr-flow://stop-hands-free" } })) { }
+                    break;
                 case "fn-tap":
                     MacNative.FnTap();
                     break;
@@ -254,7 +265,13 @@ namespace Loupedeck.AgentKeypadPlugin
                     return;
                 }
 
-                Thread.Sleep(SettleMs);   // the app is in front; give its message box time to take keyboard focus
+                Thread.Sleep(SettleMs);
+                if (!this.Current(gen)) return;
+                if (this._destination?.Restore() != true)
+                {
+                    this.Finish(gen, CapturePhase.NotSent, "image copied", "original field unavailable");
+                    return;
+                }
                 if (!this.Current(gen))
                 {
                     return;
@@ -328,8 +345,13 @@ namespace Loupedeck.AgentKeypadPlugin
                     PluginLog.Warning($"capture: {target} is not in front ({MacNative.FrontmostBundleId()}); stopping Doing anyway");
                 }
 
-                Thread.Sleep(300);   // let the app take focus before Doing pastes into it
-                if (this._disposed)
+                Thread.Sleep(300);
+                if (!this.Current(gen)) return;
+                var destination = this._destination;
+                var focused = inFront && destination?.Restore() == true;
+                var valueBefore = focused ? destination.ReadValue() : null;
+                if (!focused) PluginLog.Warning("capture: original text field could not be restored");
+                if (!this.Current(gen))
                 {
                     return;
                 }
@@ -379,6 +401,12 @@ namespace Loupedeck.AgentKeypadPlugin
                     return;
                 }
 
+                var valueAfter = destination?.ReadValue();
+                if (!CaptureOutcome.InsertionConfirmed(focused, valueBefore, valueAfter))
+                {
+                    this.Finish(gen, CapturePhase.NotSent, "text copied", "insertion not confirmed");
+                    return;
+                }
                 this.Finish(gen, CapturePhase.InBox, null);
               }
               catch (Exception ex)
@@ -605,6 +633,7 @@ namespace Loupedeck.AgentKeypadPlugin
         {
             this._disposed = true;
             this._poll.Dispose();
+            this._destination?.Dispose();
             TryKill(this._selector);
         }
     }
