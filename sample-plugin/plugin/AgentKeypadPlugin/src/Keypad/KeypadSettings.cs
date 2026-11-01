@@ -15,9 +15,8 @@ namespace Loupedeck.AgentKeypadPlugin
 
         public static KeypadSettings Current => _current ??= Load();
 
-        // How the dictation app is started and stopped: "fn-hands-free" (hold fn, tap Shift, release fn to start;
-        // tap fn to stop), "fn-tap" (tap fn to start and again to stop) "wispr" (Wispr Flow hands-free URLs) or "shortcut" (send DictationShortcut to
-        // start and again to stop).
+        // How the dictation app is started and stopped: "fn-hands-free", "fn-tap", "wispr" or
+        // "shortcut" (send DictationShortcut to start and again to stop).
         public String DictationTrigger { get; set; } = "fn-hands-free";
 
         // Used when DictationTrigger is "shortcut", for example "control+option+space".

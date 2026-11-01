@@ -22,6 +22,8 @@ namespace Loupedeck.AgentKeypadPlugin
         private readonly Object _lock = new();
         private Process _selector;
         private FocusedField _destination;
+        private Boolean _stopTriggered;
+        private Boolean _cancelProcessing;
 
         // Setting the phase also records when it began, on the animation clock.
         public CapturePhase Phase
@@ -316,6 +318,8 @@ namespace Loupedeck.AgentKeypadPlugin
 
                 gen = this._generation;
                 recorded = DateTime.UtcNow - this.StartedAt;
+                this._stopTriggered = false;
+                this._cancelProcessing = false;
                 this.Phase = CapturePhase.Processing;
                 this.Step = "Transcribing";
                 this.ProcessingSince = DateTime.UtcNow;
@@ -351,13 +355,26 @@ namespace Loupedeck.AgentKeypadPlugin
                 var focused = inFront && destination?.Restore() == true;
                 var valueBefore = focused ? destination.ReadValue() : null;
                 if (!focused) PluginLog.Warning("capture: original text field could not be restored");
-                if (!this.Current(gen))
+                var cancelledAfterStop = false;
+                lock (this._lock)
                 {
+                    if (!this.Current(gen)) return;
+                    this.PressDictationTrigger(start: false);
+                    this._stopTriggered = true;
+                    if (this._cancelProcessing)
+                    {
+                        this._generation++;
+                        this.Phase = CapturePhase.Idle;
+                        cancelledAfterStop = true;
+                    }
+                }
+                PluginLog.Info("capture: dictation trigger sent to stop the dictation app");
+                if (cancelledAfterStop)
+                {
+                    PluginLog.Info("capture: stopped waiting after the recorder stopped");
+                    this._redraw();
                     return;
                 }
-
-                this.PressDictationTrigger(start: false);
-                PluginLog.Info("capture: dictation trigger sent to stop the dictation app");
 
                 // Doing copies the transcript to the clipboard and pastes it. Wait for that copy.
                 var watch = Stopwatch.StartNew();
@@ -521,8 +538,16 @@ namespace Loupedeck.AgentKeypadPlugin
                         break;
                     case CapturePhase.Processing:
                         // Stop waiting for Doing. Anything it pastes later lands in the box unsent, as always.
-                        this._generation++;
-                        this.Phase = CapturePhase.Idle;
+                        if (this._stopTriggered)
+                        {
+                            this._generation++;
+                            this.Phase = CapturePhase.Idle;
+                        }
+                        else
+                        {
+                            // Keep the capture busy until the stop trigger has been sent.
+                            this._cancelProcessing = true;
+                        }
                         stoppedWait = true;
                         selector = null;
                         break;
@@ -533,7 +558,7 @@ namespace Loupedeck.AgentKeypadPlugin
 
             if (stoppedWait)
             {
-                PluginLog.Info("capture: stopped waiting for the transcript from the keypad");
+                PluginLog.Info("capture: cancelled transcript wait from the keypad");
                 this._redraw();
                 return true;
             }
